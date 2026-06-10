@@ -1,0 +1,25 @@
+# Build output
+/build
+/app/build
+.gradle/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Local SDK location (machine-specific; set ANDROID_HOME instead)
+local.properties
+
+# Signing — NEVER commit your keystore or its passwords
+*.jks
+*.keystore
+keystore.properties
+
+# IDE / editor (in case you ever open it in one)
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Gradle wrapper dist cache
+/gradle/wrapper/dists/
