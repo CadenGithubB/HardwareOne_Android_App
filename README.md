@@ -226,3 +226,10 @@ app/src/main/
   over the (unencrypted) link, as the protocol requires.
 - `allowBackup="false"` — nothing is backed up off-device.
 - No network permission, no third-party SDKs, no telemetry. What you build is what runs.
+
+---
+
+## License
+
+[GNU GPLv3](LICENSE). You may use, study, share, and modify this software; derivative
+works must remain under the GPLv3.
