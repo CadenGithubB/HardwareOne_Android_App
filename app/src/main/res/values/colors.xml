@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#0B0B0B</color>
+    <!-- Launcher icon: white prompt glyph on the brand indigo accent. -->
+    <color name="ic_launcher_background">#667EEA</color>
+    <!-- Launch window background (light): gradient start. Overridden in values-night. -->
+    <color name="window_bg">#667EEA</color>
 </resources>

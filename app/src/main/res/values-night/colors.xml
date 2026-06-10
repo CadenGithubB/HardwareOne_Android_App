@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Launch window background (dark): gradient start (#07070b). -->
+    <color name="window_bg">#07070B</color>
+</resources>

@@ -1,5 +1,8 @@
 package com.hardwareone.console.ui
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,16 +22,17 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
@@ -42,19 +46,21 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hardwareone.console.ble.ConnectionState
 import com.hardwareone.console.ble.DiscoveredDevice
-import com.hardwareone.console.ui.theme.TerminalAmber
-import com.hardwareone.console.ui.theme.TerminalDim
-import com.hardwareone.console.ui.theme.TerminalGreen
-import com.hardwareone.console.ui.theme.TerminalRed
+import com.hardwareone.console.ui.theme.HwColors
+import com.hardwareone.console.ui.theme.LocalHwColors
+
+private val CardShape = RoundedCornerShape(14.dp)
 
 @Composable
 fun ConsoleScreen(
@@ -63,6 +69,7 @@ fun ConsoleScreen(
     widthSizeClass: WindowWidthSizeClass,
     foldPosture: FoldPosture,
 ) {
+    val hw = LocalHwColors.current
     val state by vm.connectionState.collectAsState()
     val log by vm.log.collectAsState()
     val devices by vm.scanResults.collectAsState()
@@ -92,9 +99,6 @@ fun ConsoleScreen(
             onClear = vm::clearLog,
         )
     }
-    val divider: @Composable () -> Unit = {
-        HorizontalDivider(color = TerminalDim.copy(alpha = 0.3f))
-    }
     val deviceList: @Composable () -> Unit = { DeviceList(devices, vm::connect) }
     val logView: @Composable (Modifier) -> Unit = { m -> LogView(log, m) }
     val inputBar: @Composable () -> Unit = {
@@ -108,7 +112,11 @@ fun ConsoleScreen(
         )
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Brush.linearGradient(hw.gradient)),
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -116,8 +124,6 @@ fun ConsoleScreen(
                 .imePadding(),
             contentAlignment = Alignment.TopCenter,
         ) {
-            // On the unfolded inner screen (and tablets/landscape) keep lines readable by
-            // constraining width and centring, instead of stretching edge-to-edge.
             val isCompact = widthSizeClass == WindowWidthSizeClass.Compact
             val columnModifier =
                 if (isCompact) Modifier.fillMaxSize().padding(horizontal = 12.dp)
@@ -125,41 +131,37 @@ fun ConsoleScreen(
 
             when (foldPosture) {
                 is FoldPosture.Tabletop -> {
-                    // Half-open, horizontal hinge: log on the propped-up top panel,
-                    // controls on the flat bottom panel, with a gap for the hinge.
-                    val hingeGap = with(LocalDensity.current) {
+                    val hingeGap = with(androidx.compose.ui.platform.LocalDensity.current) {
                         foldPosture.hingeThicknessPx.toDp()
                     }
                     Column(columnModifier) {
-                        Column(Modifier.weight(1f).fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
                             header()
-                            divider()
                             logView(Modifier.weight(1f).fillMaxWidth())
                         }
                         Spacer(Modifier.height(hingeGap))
-                        Column(Modifier.weight(1f).fillMaxWidth()) {
-                            if (showDevices) {
-                                deviceList()
-                                divider()
-                            }
+                        Column(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            if (showDevices) deviceList()
                             Spacer(Modifier.weight(1f))
-                            divider()
                             inputBar()
                         }
                     }
                 }
 
                 else -> {
-                    // Flat / cover screen / book posture: one scrolling column.
-                    Column(columnModifier) {
+                    Column(
+                        modifier = columnModifier,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
                         header()
-                        divider()
-                        if (showDevices) {
-                            deviceList()
-                            divider()
-                        }
+                        if (showDevices) deviceList()
                         logView(Modifier.weight(1f).fillMaxWidth())
-                        divider()
                         inputBar()
                     }
                 }
@@ -189,54 +191,48 @@ private fun Header(
     onStatus: () -> Unit,
     onClear: () -> Unit,
 ) {
-    Column(modifier = Modifier.padding(vertical = 8.dp)) {
+    val hw = LocalHwColors.current
+    Column(
+        modifier = Modifier.padding(top = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = "HardwareOne",
-                color = TerminalGreen,
-                style = MaterialTheme.typography.bodyLarge,
+                color = hw.onGradient,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
             )
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(10.dp))
             Text(
                 text = statusLabel(state, authenticated),
-                color = statusColor(state),
-                style = MaterialTheme.typography.bodySmall,
+                color = statusColor(state, hw),
+                style = MaterialTheme.typography.labelMedium,
             )
         }
-        Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             when (state) {
                 is ConnectionState.Scanning -> {
-                    OutlinedButton(onClick = onStopScan) { Text("STOP") }
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = TerminalGreen,
-                        strokeWidth = 2.dp,
-                    )
+                    SecondaryButton(onStopScan, "STOP")
+                    Spinner()
                 }
                 is ConnectionState.Ready -> {
-                    OutlinedButton(onClick = onStatus) { Text("STATUS") }
-                    OutlinedButton(onClick = onDisconnect) { Text("DISCONNECT") }
+                    SecondaryButton(onStatus, "STATUS")
+                    SecondaryButton(onDisconnect, "DISCONNECT")
                 }
                 is ConnectionState.Connecting,
                 is ConnectionState.DiscoveringServices,
                 is ConnectionState.NegotiatingMtu,
                 is ConnectionState.EnablingNotifications -> {
-                    OutlinedButton(onClick = onDisconnect) { Text("CANCEL") }
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = TerminalGreen,
-                        strokeWidth = 2.dp,
-                    )
+                    SecondaryButton(onDisconnect, "CANCEL")
+                    Spinner()
                 }
                 else -> { // Disconnected / Failed
-                    Button(onClick = onScan) { Text("SCAN") }
-                    if (state is ConnectionState.Failed) {
-                        OutlinedButton(onClick = onReconnect) { Text("RECONNECT") }
-                    }
+                    PrimaryButton(onScan, text = "SCAN")
+                    if (state is ConnectionState.Failed) SecondaryButton(onReconnect, "RECONNECT")
                 }
             }
-            TextButton(onClick = onClear) { Text("CLEAR") }
+            SecondaryButton(onClear, "CLEAR")
         }
     }
 }
@@ -246,11 +242,18 @@ private fun DeviceList(
     devices: List<DiscoveredDevice>,
     onConnect: (DiscoveredDevice) -> Unit,
 ) {
-    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+    val hw = LocalHwColors.current
+    Column(
+        modifier = Modifier
+            .clip(CardShape)
+            .background(hw.cardBg)
+            .border(1.dp, hw.cardBorder, CardShape)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
         Text(
-            text = "Devices (${devices.size}) — tap to connect:",
-            color = TerminalDim,
-            style = MaterialTheme.typography.bodySmall,
+            text = "Devices (${devices.size}) — tap to connect",
+            color = hw.muted,
+            style = MaterialTheme.typography.labelMedium,
         )
         LazyColumn(modifier = Modifier.heightIn(max = 160.dp)) {
             items(devices, key = { it.address }) { device ->
@@ -258,12 +261,13 @@ private fun DeviceList(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { onConnect(device) }
-                        .padding(vertical = 6.dp),
+                        .padding(vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = "${device.name}  ${device.address}",
-                        color = TerminalGreen,
+                        text = "${device.name}  ·  ${device.address}",
+                        color = hw.onGradient,
                         style = MaterialTheme.typography.bodyMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -271,8 +275,8 @@ private fun DeviceList(
                     )
                     Text(
                         text = "${device.rssi} dBm",
-                        color = TerminalDim,
-                        style = MaterialTheme.typography.bodySmall,
+                        color = hw.muted,
+                        style = MaterialTheme.typography.labelMedium,
                     )
                 }
             }
@@ -282,18 +286,22 @@ private fun DeviceList(
 
 @Composable
 private fun LogView(log: List<LogEntry>, modifier: Modifier = Modifier) {
+    val hw = LocalHwColors.current
     val listState = rememberLazyListState()
     LaunchedEffect(log.size) {
         if (log.isNotEmpty()) listState.scrollToItem(log.size - 1)
     }
     LazyColumn(
         state = listState,
-        modifier = modifier.padding(vertical = 6.dp),
+        modifier = modifier
+            .clip(CardShape)
+            .background(hw.terminalBg)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         items(log) { entry ->
             Text(
                 text = entry.text,
-                color = colorFor(entry.kind),
+                color = colorFor(entry.kind, hw),
                 fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(vertical = 1.dp),
@@ -311,10 +319,9 @@ private fun InputBar(
     onSend: () -> Unit,
     onLogin: () -> Unit,
 ) {
+    val hw = LocalHwColors.current
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -323,20 +330,29 @@ private fun InputBar(
             onValueChange = onValueChange,
             enabled = enabled,
             singleLine = true,
-            placeholder = {
-                Text(
-                    if (enabled) "type a command (e.g. help)" else "connect to begin",
-                    color = TerminalDim.copy(alpha = 0.6f),
-                )
-            },
+            shape = CardShape,
+            placeholder = { Text(if (enabled) "type a command (e.g. help)" else "connect to begin") },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = { onSend() }),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = hw.onGradient,
+                unfocusedTextColor = hw.onGradient,
+                disabledTextColor = hw.muted,
+                focusedContainerColor = hw.cardBg,
+                unfocusedContainerColor = hw.cardBg,
+                disabledContainerColor = hw.cardBg,
+                cursorColor = hw.accent,
+                focusedBorderColor = hw.accent,
+                unfocusedBorderColor = hw.cardBorder,
+                disabledBorderColor = hw.cardBorder,
+                focusedPlaceholderColor = hw.muted,
+                unfocusedPlaceholderColor = hw.muted,
+                disabledPlaceholderColor = hw.muted,
+            ),
             modifier = Modifier.weight(1f),
         )
-        if (enabled && !authenticated) {
-            OutlinedButton(onClick = onLogin) { Text("LOGIN") }
-        }
-        Button(onClick = onSend, enabled = enabled && value.isNotBlank()) { Text("SEND") }
+        if (enabled && !authenticated) PrimaryButton(onLogin, text = "LOGIN")
+        PrimaryButton(onSend, enabled = enabled && value.isNotBlank(), text = "SEND")
     }
 }
 
@@ -349,7 +365,7 @@ private fun LoginDialog(
     var pass by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Log in", color = TerminalGreen) },
+        title = { Text("Log in") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -368,22 +384,56 @@ private fun LoginDialog(
                 )
             }
         },
-        confirmButton = {
-            TextButton(onClick = { onSubmit(user, pass) }) { Text("LOG IN") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("CANCEL") }
-        },
+        confirmButton = { TextButton(onClick = { onSubmit(user, pass) }) { Text("LOG IN") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("CANCEL") } },
+    )
+}
+
+// --- shared button styles ---------------------------------------------------------
+
+/** Solid light button with accent text — the primary action, high-contrast on the gradient. */
+@Composable
+private fun PrimaryButton(onClick: () -> Unit, enabled: Boolean = true, text: String) {
+    val hw = LocalHwColors.current
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = hw.onGradient,
+            contentColor = hw.accent,
+            disabledContainerColor = hw.cardBg,
+            disabledContentColor = hw.muted,
+        ),
+    ) { Text(text) }
+}
+
+/** Frosted outlined button — secondary actions. */
+@Composable
+private fun SecondaryButton(onClick: () -> Unit, text: String) {
+    val hw = LocalHwColors.current
+    OutlinedButton(
+        onClick = onClick,
+        border = BorderStroke(1.dp, hw.cardBorder),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = hw.onGradient),
+    ) { Text(text) }
+}
+
+@Composable
+private fun Spinner() {
+    CircularProgressIndicator(
+        modifier = Modifier.size(20.dp),
+        color = LocalHwColors.current.onGradient,
+        strokeWidth = 2.dp,
     )
 }
 
 // --- small helpers ----------------------------------------------------------------
 
-private fun colorFor(kind: LogEntry.Kind): Color = when (kind) {
-    LogEntry.Kind.OUTGOING -> TerminalAmber
-    LogEntry.Kind.INCOMING -> TerminalGreen
-    LogEntry.Kind.INFO -> TerminalDim
-    LogEntry.Kind.ERROR -> TerminalRed
+private fun colorFor(kind: LogEntry.Kind, hw: HwColors): Color = when (kind) {
+    LogEntry.Kind.OUTGOING -> hw.logOut
+    LogEntry.Kind.INCOMING -> hw.logIn
+    LogEntry.Kind.INFO -> hw.logInfo
+    LogEntry.Kind.ERROR -> hw.logError
 }
 
 private fun statusLabel(state: ConnectionState, authenticated: Boolean): String = when (state) {
@@ -398,9 +448,9 @@ private fun statusLabel(state: ConnectionState, authenticated: Boolean): String 
     is ConnectionState.Failed -> "● ${state.reason}"
 }
 
-private fun statusColor(state: ConnectionState): Color = when (state) {
-    is ConnectionState.Ready -> TerminalGreen
-    is ConnectionState.Failed -> TerminalRed
-    is ConnectionState.Disconnected -> TerminalDim
-    else -> TerminalAmber
+private fun statusColor(state: ConnectionState, hw: HwColors): Color = when (state) {
+    is ConnectionState.Ready -> hw.success
+    is ConnectionState.Failed -> hw.danger
+    is ConnectionState.Disconnected -> hw.muted
+    else -> hw.onGradient
 }
