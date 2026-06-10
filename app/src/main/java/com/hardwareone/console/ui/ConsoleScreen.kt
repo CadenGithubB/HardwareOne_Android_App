@@ -29,6 +29,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -49,12 +51,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.hardwareone.console.R
 import com.hardwareone.console.ble.ConnectionState
 import com.hardwareone.console.ble.DiscoveredDevice
 import com.hardwareone.console.ui.theme.HwColors
@@ -68,6 +72,7 @@ fun ConsoleScreen(
     onScanClicked: () -> Unit,
     widthSizeClass: WindowWidthSizeClass,
     foldPosture: FoldPosture,
+    onOpenSettings: () -> Unit,
 ) {
     val hw = LocalHwColors.current
     val state by vm.connectionState.collectAsState()
@@ -97,6 +102,7 @@ fun ConsoleScreen(
             onReconnect = vm::reconnect,
             onStatus = vm::readStatus,
             onClear = vm::clearLog,
+            onOpenSettings = onOpenSettings,
         )
     }
     val deviceList: @Composable () -> Unit = { DeviceList(devices, vm::connect) }
@@ -190,13 +196,17 @@ private fun Header(
     onReconnect: () -> Unit,
     onStatus: () -> Unit,
     onClear: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     val hw = LocalHwColors.current
     Column(
         modifier = Modifier.padding(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
                 text = "HardwareOne",
                 color = hw.onGradient,
@@ -208,7 +218,17 @@ private fun Header(
                 text = statusLabel(state, authenticated),
                 color = statusColor(state, hw),
                 style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
+            IconButton(onClick = onOpenSettings) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_settings),
+                    contentDescription = "Settings",
+                    tint = hw.onGradient,
+                )
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             when (state) {
