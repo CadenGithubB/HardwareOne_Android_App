@@ -70,6 +70,7 @@ fun SettingsScreen(
     onAutoSaveLogsChange: (Boolean) -> Unit,
     onOpenSavedLogs: () -> Unit,
     secureChannelConfigured: Boolean,
+    secureChannelLocked: Boolean,
     onSetChannelPassphrase: (String) -> Unit,
     onClearChannelPassphrase: () -> Unit,
     onBack: () -> Unit,
@@ -165,6 +166,7 @@ fun SettingsScreen(
 
                     SecureChannelCard(
                         configured = secureChannelConfigured,
+                        locked = secureChannelLocked,
                         onSet = onSetChannelPassphrase,
                         onClear = onClearChannelPassphrase,
                     )
@@ -269,6 +271,7 @@ private fun SecurityCard(
 @Composable
 private fun SecureChannelCard(
     configured: Boolean,
+    locked: Boolean,
     onSet: (String) -> Unit,
     onClear: () -> Unit,
 ) {
@@ -279,15 +282,29 @@ private fun SecureChannelCard(
             .fillMaxWidth()
             .clip(CardShape)
             .background(hw.cardBg)
-            .border(1.dp, hw.cardBorder, CardShape)
+            .border(1.dp, if (locked) hw.danger else hw.cardBorder, CardShape)
             .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
         Text(
-            text = if (configured) "Secure channel · ON" else "Secure channel",
-            color = hw.muted,
+            text = when {
+                locked -> "Secure channel · LOCKED"
+                configured -> "Secure channel · ON"
+                else -> "Secure channel"
+            },
+            color = if (locked) hw.danger else hw.muted,
             style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.padding(vertical = 6.dp),
         )
+        if (locked) {
+            Text(
+                text = "🔒 The saved passphrase couldn't be unlocked (this can happen after " +
+                    "reinstalling the app), so the channel is off. Re-enter it below to restore " +
+                    "encryption.",
+                color = hw.danger,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+        }
         Text(
             text = "Encrypts commands and replies app-side (X25519 + ChaCha20-Poly1305). The " +
                 "passphrase must match the device's \"blesecret\". Applies on the next connect.",
@@ -331,8 +348,8 @@ private fun SecureChannelCard(
                     disabledContainerColor = hw.cardBg,
                     disabledContentColor = hw.muted,
                 ),
-            ) { Text(if (configured) "UPDATE" else "SAVE") }
-            if (configured) {
+            ) { Text(if (locked) "RE-ENTER" else if (configured) "UPDATE" else "SAVE") }
+            if (configured || locked) {
                 TextButton(onClick = onClear) { Text("Disable", color = hw.danger) }
             }
         }

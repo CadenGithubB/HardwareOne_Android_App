@@ -33,7 +33,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -66,7 +65,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hardwareone.console.R
 import com.hardwareone.console.ble.ConnectionState
-import com.hardwareone.console.ble.DeviceInfo
 import com.hardwareone.console.ble.DiscoveredDevice
 import com.hardwareone.console.ui.theme.HwColors
 import com.hardwareone.console.ui.theme.LocalHwColors
@@ -80,6 +78,7 @@ fun ConsoleScreen(
     widthSizeClass: WindowWidthSizeClass,
     foldPosture: FoldPosture,
     onOpenSettings: () -> Unit,
+    onOpenStatus: () -> Unit,
     onLogin: (username: String, password: String, remember: Boolean) -> Unit,
     onLoginButton: () -> Unit,
 ) {
@@ -91,7 +90,6 @@ fun ConsoleScreen(
     val savedUsername by vm.savedUsername.collectAsState()
     val canRememberCreds = vm.canUseCredentialStore
     val showLogin by vm.loginDialogVisible.collectAsState()
-    val deviceInfo by vm.deviceInfo.collectAsState()
 
     // rememberSaveable so a fold/unfold (or rotation) keeps the typed line.
     var input by rememberSaveable { mutableStateOf("") }
@@ -114,7 +112,6 @@ fun ConsoleScreen(
         Header(
             state = state,
             authenticated = authenticated,
-            deviceInfo = deviceInfo,
             compact = isCompact,
             onScan = onScanClicked,
             onStopScan = vm::stopScan,
@@ -122,6 +119,7 @@ fun ConsoleScreen(
             onReconnect = vm::reconnect,
             onReadStatus = vm::readStatus,
             onSyncClock = vm::syncClock,
+            onOpenStatus = onOpenStatus,
             onClear = vm::clearLog,
             onSaveLog = saveLog,
             onOpenSettings = onOpenSettings,
@@ -213,7 +211,6 @@ fun ConsoleScreen(
 private fun Header(
     state: ConnectionState,
     authenticated: Boolean,
-    deviceInfo: DeviceInfo?,
     compact: Boolean,
     onScan: () -> Unit,
     onStopScan: () -> Unit,
@@ -221,6 +218,7 @@ private fun Header(
     onReconnect: () -> Unit,
     onReadStatus: () -> Unit,
     onSyncClock: () -> Unit,
+    onOpenStatus: () -> Unit,
     onClear: () -> Unit,
     onSaveLog: (() -> Unit)?,
     onOpenSettings: () -> Unit,
@@ -228,7 +226,7 @@ private fun Header(
     val controls: @Composable () -> Unit = {
         PrimaryConnectionButton(state, onScan, onStopScan, onDisconnect)
         ConsoleMenu(onSaveLog, onClear)
-        DeviceMenu(state, authenticated, deviceInfo, onReadStatus, onSyncClock, onReconnect)
+        DeviceMenu(state, onReadStatus, onSyncClock, onOpenStatus, onReconnect)
     }
     if (compact) {
         Column(
@@ -307,41 +305,33 @@ private fun ConsoleMenu(onSaveLog: (() -> Unit)?, onClear: () -> Unit) {
     }
 }
 
-/** "Device ▾" menu: what's connected, plus status/reconnect actions. */
+/** "Device ▾" menu: device actions only (status page / read status / sync clock / reconnect). */
 @Composable
 private fun DeviceMenu(
     state: ConnectionState,
-    authenticated: Boolean,
-    deviceInfo: DeviceInfo?,
     onReadStatus: () -> Unit,
     onSyncClock: () -> Unit,
+    onOpenStatus: () -> Unit,
     onReconnect: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
         MenuButton("Device") { expanded = true }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            if (deviceInfo != null) {
-                MenuInfo("Name", deviceInfo.name)
-                MenuInfo("Address", deviceInfo.address)
-                MenuInfo("State", statusLabel(state, authenticated).dropWhile { !it.isLetter() })
-                if (deviceInfo.mtu > 0) MenuInfo("MTU", deviceInfo.mtu.toString())
-                MenuInfo("Secure", if (deviceInfo.secure) "yes" else "no")
-                deviceInfo.firmware?.let { MenuInfo("Firmware", it) }
-                deviceInfo.model?.let { MenuInfo("Model", it) }
-                if (state is ConnectionState.Ready) {
-                    HorizontalDivider()
-                    DropdownMenuItem(
-                        text = { Text("Read status") },
-                        onClick = { expanded = false; onReadStatus() },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Sync clock") },
-                        onClick = { expanded = false; onSyncClock() },
-                    )
-                }
+            if (state is ConnectionState.Ready) {
+                DropdownMenuItem(
+                    text = { Text("Status page") },
+                    onClick = { expanded = false; onOpenStatus() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Read status") },
+                    onClick = { expanded = false; onReadStatus() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Sync clock") },
+                    onClick = { expanded = false; onSyncClock() },
+                )
             } else {
-                DropdownMenuItem(text = { Text("Not connected") }, enabled = false, onClick = {})
                 DropdownMenuItem(
                     text = { Text("Reconnect") },
                     onClick = { expanded = false; onReconnect() },
@@ -360,25 +350,6 @@ private fun MenuButton(label: String, onClick: () -> Unit) {
         border = BorderStroke(1.dp, hw.cardBorder),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = hw.onGradient),
     ) { Text("$label ▾") }
-}
-
-/** Read-only label/value row inside a dropdown menu. */
-@Composable
-private fun MenuInfo(label: String, value: String) {
-    Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 3.dp)) {
-        Text(
-            text = "$label: ",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
 }
 
 @Composable

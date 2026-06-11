@@ -18,6 +18,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -37,6 +38,7 @@ import com.hardwareone.console.ui.ConsoleViewModel
 import com.hardwareone.console.ui.LogViewerScreen
 import com.hardwareone.console.ui.SavedLogsScreen
 import com.hardwareone.console.ui.SettingsScreen
+import com.hardwareone.console.ui.StatusScreen
 import com.hardwareone.console.ui.ThemePreference
 import com.hardwareone.console.ui.ThemeStore
 import com.hardwareone.console.ui.rememberFoldPosture
@@ -64,6 +66,7 @@ class MainActivity : FragmentActivity() {
     private sealed interface Screen {
         data object Console : Screen
         data object Settings : Screen
+        data object Status : Screen
         data object SavedLogs : Screen
         data class Viewer(val fileName: String, val title: String, val text: String) : Screen
     }
@@ -136,6 +139,7 @@ class MainActivity : FragmentActivity() {
                         widthSizeClass = widthSizeClass,
                         foldPosture = foldPosture,
                         onOpenSettings = { navTo(Screen.Settings) },
+                        onOpenStatus = { navTo(Screen.Status) },
                         onLogin = { user, pass, remember ->
                             vm.login(user, pass)
                             if (remember) authAndSaveCredentials(user, pass)
@@ -149,6 +153,7 @@ class MainActivity : FragmentActivity() {
                         val savedUser by vm.savedUsername.collectAsState()
                         val autoSaveLogs by vm.autoSaveLogs.collectAsState()
                         val secureConfigured by vm.secureChannelConfigured.collectAsState()
+                        val secureLocked by vm.secureChannelLocked.collectAsState()
                         SettingsScreen(
                             themePref = themePref,
                             onThemeChange = { themePref = it; ThemeStore.save(this, it) },
@@ -163,9 +168,40 @@ class MainActivity : FragmentActivity() {
                             onAutoSaveLogsChange = vm::setAutoSaveLogs,
                             onOpenSavedLogs = { vm.refreshSavedLogs(); navTo(Screen.SavedLogs) },
                             secureChannelConfigured = secureConfigured,
+                            secureChannelLocked = secureLocked,
                             onSetChannelPassphrase = vm::setChannelPassphrase,
                             onClearChannelPassphrase = vm::clearChannelPassphrase,
                             onBack = { navBack() },
+                        )
+                    }
+
+                    Screen.Status -> {
+                        val status by vm.deviceStatus.collectAsState()
+                        val loading by vm.statusLoading.collectAsState()
+                        val statusError by vm.statusError.collectAsState()
+                        val i2cDevices by vm.i2cDevices.collectAsState()
+                        val i2cLoading by vm.i2cLoading.collectAsState()
+                        // Poll while the page is open AND the app is in the foreground
+                        // (request/response — no push/subscribe). repeatOnLifecycle cancels the
+                        // loop on pause/screen-lock/background and restarts it on resume, so a
+                        // locked phone doesn't keep polling the device.
+                        LaunchedEffect(Unit) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                while (true) {
+                                    vm.refreshStatus()
+                                    kotlinx.coroutines.delay(3_000)
+                                }
+                            }
+                        }
+                        StatusScreen(
+                            status = status,
+                            loading = loading,
+                            error = statusError,
+                            i2cDevices = i2cDevices,
+                            i2cLoading = i2cLoading,
+                            onLoadI2cDevices = vm::loadI2cDevices,
+                            onRefresh = vm::refreshStatus,
+                            onBack = { vm.clearStatus(); navBack() },
                         )
                     }
 

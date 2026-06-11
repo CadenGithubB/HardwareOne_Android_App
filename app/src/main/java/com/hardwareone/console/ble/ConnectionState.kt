@@ -47,3 +47,9 @@ data class DeviceInfo(
 data class BleMessage(val text: String, val kind: Kind) {
     enum class Kind { INCOMING, INFO, ERROR }
 }
+
+/**
+ * The assembled reply to a captured command (one diverted off the console), keyed by [tag].
+ * [text] is the raw reply body; [timedOut] is true when nothing came back in time.
+ */
+data class Capture(val tag: String, val text: String, val timedOut: Boolean)

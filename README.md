@@ -1,4 +1,4 @@
-# HardwareOne Console (Android) — v1.3.2
+# HardwareOne Console (Android) — v1.4.0
 
 A **Google-free** Android app that scans for, connects to, and messages an **ESP32-S3
 "HardwareOne"** device over **Bluetooth LE** — a single-screen, terminal-style console.
@@ -196,7 +196,8 @@ characteristics as opaque binary:
    - the connection button — **SCAN / STOP / CANCEL / DISCONNECT**,
    - **Console ▾** — *Save log* / *Clear log*,
    - **Device ▾** — what's connected (name, address, MTU, secure y/n, firmware, model) plus
-     *Read status*, or *Reconnect* when disconnected,
+     *Status page* (a polled health/connectivity view — see [docs/DEVICE_STATUS.md](docs/DEVICE_STATUS.md)),
+     *Read status*, *Sync clock*, or *Reconnect* when disconnected,
    - **⚙** — Settings (appearance, credentials, logs, secure channel).
 
 ---

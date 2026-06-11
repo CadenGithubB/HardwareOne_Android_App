@@ -6,6 +6,7 @@ import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -25,6 +26,9 @@ class SecretBox(context: Context, private val alias: String, prefsName: String) 
 
     fun has(): Boolean = prefs.contains(KEY_CT) && keyExists()
 
+    /** A ciphertext blob is stored, regardless of whether it can still be decrypted. */
+    fun hasCiphertext(): Boolean = prefs.contains(KEY_CT)
+
     fun put(value: String) {
         val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, getOrCreateKey()) }
         val ct = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
@@ -35,15 +39,21 @@ class SecretBox(context: Context, private val alias: String, prefsName: String) 
     }
 
     fun get(): String? {
-        val ct = prefs.getString(KEY_CT, null)?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return null
-        val iv = prefs.getString(KEY_IV, null)?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return null
-        val key = existingKey() ?: return null
-        return runCatching {
+        val ct = prefs.getString(KEY_CT, null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+            ?: run { Log.w(TAG, "get[$alias]: no ciphertext in prefs"); return null }
+        val iv = prefs.getString(KEY_IV, null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+            ?: run { Log.w(TAG, "get[$alias]: no iv in prefs"); return null }
+        val key = existingKey()
+            ?: run { Log.w(TAG, "get[$alias]: keystore key missing/unreadable"); return null }
+        return try {
             val cipher = Cipher.getInstance(TRANSFORMATION).apply {
                 init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
             }
             String(cipher.doFinal(ct), Charsets.UTF_8)
-        }.getOrNull()
+        } catch (e: Exception) {
+            Log.w(TAG, "get[$alias]: decrypt failed: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
     }
 
     fun clear() {
@@ -54,7 +64,12 @@ class SecretBox(context: Context, private val alias: String, prefsName: String) 
     private fun keyStore(): KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
     private fun keyExists(): Boolean = runCatching { keyStore().containsAlias(alias) }.getOrDefault(false)
     private fun existingKey(): SecretKey? =
-        runCatching { (keyStore().getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey }.getOrNull()
+        try {
+            (keyStore().getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
+        } catch (e: Exception) {
+            Log.w(TAG, "existingKey[$alias]: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
 
     private fun getOrCreateKey(): SecretKey = existingKey() ?: generateKey(strongBox = hasStrongBox())
 
@@ -70,13 +85,17 @@ class SecretBox(context: Context, private val alias: String, prefsName: String) 
             .setKeySize(256)
         if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) builder.setIsStrongBoxBacked(true)
         return try {
-            gen.init(builder.build()); gen.generateKey()
+            gen.init(builder.build()); gen.generateKey().also {
+                Log.i(TAG, "generateKey[$alias]: created (strongBox=$strongBox)")
+            }
         } catch (e: Exception) {
+            Log.w(TAG, "generateKey[$alias]: strongBox=$strongBox failed: ${e.javaClass.simpleName}: ${e.message}")
             if (strongBox) generateKey(strongBox = false) else throw e
         }
     }
 
     private companion object {
+        const val TAG = "SecretBox"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val KEY_CT = "secret_ct"

@@ -36,6 +36,24 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     val authenticated: StateFlow<Boolean> = ble.authenticated
     val deviceInfo: StateFlow<com.hardwareone.console.ble.DeviceInfo?> = ble.deviceInfo
 
+    // --- Device status page (`status json`, captured off-console) ---
+    private val _deviceStatus = MutableStateFlow<com.hardwareone.console.ble.DeviceStatus?>(null)
+    val deviceStatus: StateFlow<com.hardwareone.console.ble.DeviceStatus?> = _deviceStatus.asStateFlow()
+
+    private val _statusError = MutableStateFlow<String?>(null)
+    val statusError: StateFlow<String?> = _statusError.asStateFlow()
+
+    private val _statusLoading = MutableStateFlow(false)
+    val statusLoading: StateFlow<Boolean> = _statusLoading.asStateFlow()
+
+    // I²C device list (`devices json`), lazily loaded when the user expands the I²C card.
+    // null = not loaded yet; empty list = loaded, none present.
+    private val _i2cDevices = MutableStateFlow<List<com.hardwareone.console.ble.I2cDevice>?>(null)
+    val i2cDevices: StateFlow<List<com.hardwareone.console.ble.I2cDevice>?> = _i2cDevices.asStateFlow()
+
+    private val _i2cLoading = MutableStateFlow(false)
+    val i2cLoading: StateFlow<Boolean> = _i2cLoading.asStateFlow()
+
     // --- Credential storage state ---
     /** Device can present a biometric/PIN prompt (a credential is enrolled). */
     val canUseCredentialStore: Boolean get() = credentials.canAuthenticate()
@@ -76,9 +94,35 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 append(LogEntry(msg.text, msg.kind.toLogKind()))
             }
         }
+        // Route captured (off-console) command replies to their pages.
+        viewModelScope.launch {
+            ble.captures.collect { capture ->
+                when (capture.tag) {
+                    TAG_STATUS -> onStatusCapture(capture.text, capture.timedOut)
+                    TAG_DEVICES -> onDevicesCapture(capture.text, capture.timedOut)
+                }
+            }
+        }
+        // Declare secure mode synchronously (before the async key load) so a connection waits
+        // for the PSK instead of racing it to plaintext.
+        ble.setSecureExpected(channelSecret.hasCiphertext())
         // Load any saved secure-channel passphrase and arm the PSK (off the main thread).
         viewModelScope.launch(Dispatchers.Default) {
-            channelSecret.get()?.let { ble.setPsk(SecureChannel.derivePsk(it)) }
+            val pass = channelSecret.get()
+            when {
+                pass != null -> ble.setPsk(SecureChannel.derivePsk(pass))
+                // Configured, but the stored secret can't be decrypted (e.g. the Keystore key
+                // was lost on reinstall). Don't silently fall back to plaintext — flag it so the
+                // user is told to re-enter, instead of a baffling "device ignores everything".
+                channelSecret.hasCiphertext() -> {
+                    _secureChannelLocked.value = true
+                    reportError(
+                        "🔒 Secure channel is configured but its saved passphrase couldn't be " +
+                            "unlocked (this can happen after reinstalling the app). Re-enter it " +
+                            "in Settings → Secure channel to use encryption.",
+                    )
+                }
+            }
         }
     }
 
@@ -96,6 +140,55 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         val epoch = System.currentTimeMillis() / 1000
         append(LogEntry("> timeset $epoch  (sync clock)", LogEntry.Kind.OUTGOING))
         ble.sendCommand("timeset $epoch")
+    }
+
+    /** Request a fresh device-status snapshot (`status json`), captured off the console. */
+    fun refreshStatus() {
+        if (connectionState.value !is ConnectionState.Ready) {
+            _statusError.value = "Not connected."
+            return
+        }
+        _statusLoading.value = true
+        ble.sendCaptured("status json", TAG_STATUS)
+    }
+
+    /** Drop the cached status snapshot (call when leaving the status page). */
+    fun clearStatus() {
+        _deviceStatus.value = null
+        _statusError.value = null
+        _statusLoading.value = false
+        _i2cDevices.value = null
+        _i2cLoading.value = false
+    }
+
+    /** Lazily fetch the I²C device list (`devices json`) when the user expands that card. */
+    fun loadI2cDevices() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        _i2cLoading.value = true
+        ble.sendCaptured("devices json", TAG_DEVICES)
+    }
+
+    private fun onDevicesCapture(text: String, timedOut: Boolean) {
+        _i2cLoading.value = false
+        if (timedOut || text.isBlank()) return // keep whatever we had; user can retry
+        com.hardwareone.console.ble.I2cDevice.parseList(text)?.let { _i2cDevices.value = it }
+    }
+
+    private fun onStatusCapture(text: String, timedOut: Boolean) {
+        _statusLoading.value = false
+        if (timedOut || text.isBlank()) {
+            _statusError.value = "No response from device."
+            return
+        }
+        val parsed = com.hardwareone.console.ble.DeviceStatus.parse(text)
+        when {
+            parsed == null -> _statusError.value = "Couldn't parse device status."
+            parsed.error != null -> _statusError.value = "Device busy (${parsed.error}); retrying…"
+            else -> {
+                _deviceStatus.value = parsed
+                _statusError.value = null
+            }
+        }
     }
 
     /** Send whatever the user typed. Login lines have their password masked in the log. */
@@ -256,6 +349,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private val _secureChannelConfigured = MutableStateFlow(channelSecret.has())
     val secureChannelConfigured: StateFlow<Boolean> = _secureChannelConfigured.asStateFlow()
 
+    /** Configured but the saved passphrase couldn't be decrypted — user must re-enter it. */
+    private val _secureChannelLocked = MutableStateFlow(false)
+    val secureChannelLocked: StateFlow<Boolean> = _secureChannelLocked.asStateFlow()
+
     fun setChannelPassphrase(passphrase: String) {
         val pass = passphrase.trim()
         if (pass.length < 8) {
@@ -264,6 +361,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         }
         channelSecret.put(pass)
         _secureChannelConfigured.value = true
+        _secureChannelLocked.value = false
+        ble.setSecureExpected(true)
         viewModelScope.launch(Dispatchers.Default) { ble.setPsk(SecureChannel.derivePsk(pass)) }
         reportInfo("Secure-channel passphrase saved. It applies on the next connect.")
     }
@@ -271,7 +370,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     fun clearChannelPassphrase() {
         channelSecret.clear()
         ble.setPsk(null)
+        ble.setSecureExpected(false)
         _secureChannelConfigured.value = false
+        _secureChannelLocked.value = false
         reportInfo("Secure channel disabled (passphrase cleared).")
     }
 
@@ -288,5 +389,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val MAX_LOG_LINES = 2000
+        const val TAG_STATUS = "status"
+        const val TAG_DEVICES = "devices"
     }
 }

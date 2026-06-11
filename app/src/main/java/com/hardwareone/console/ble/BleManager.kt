@@ -77,6 +77,10 @@ class BleManager(context: Context) {
     private val _messages = MutableSharedFlow<BleMessage>(extraBufferCapacity = 128)
     val messages: SharedFlow<BleMessage> = _messages.asSharedFlow()
 
+    /** Off-console captured command replies (e.g. `status json`), keyed by [Capture.tag]. */
+    private val _captures = MutableSharedFlow<Capture>(extraBufferCapacity = 8)
+    val captures: SharedFlow<Capture> = _captures.asSharedFlow()
+
     val isBluetoothSupported: Boolean get() = adapter != null
     val isBluetoothEnabled: Boolean get() = adapter?.isEnabled == true
 
@@ -88,9 +92,22 @@ class BleManager(context: Context) {
     private val rxLock = Any()
     private val rxBuffer = StringBuilder()
 
+    // Secure mode is *expected* as soon as we know a passphrase is configured — which the
+    // ViewModel knows synchronously at startup, before the PSK has been derived on a background
+    // thread. This lets a connection wait for the key instead of racing it to plaintext.
+    @Volatile private var secureExpected = false
+    @Volatile private var awaitingPsk = false
+
     /** Configure (or clear) the pre-shared key. Takes effect on the next connect. */
     fun setPsk(newPsk: ByteArray?) {
         psk = newPsk
+        // If a connection is parked waiting for the key, kick off the handshake now.
+        if (newPsk != null) handler.post { startPendingHandshake() }
+    }
+
+    /** Mark whether a secure channel is configured (a passphrase exists), key or not. */
+    fun setSecureExpected(expected: Boolean) {
+        secureExpected = expected
     }
 
     val secureModeConfigured: Boolean get() = psk != null
@@ -291,8 +308,9 @@ class BleManager(context: Context) {
                 fail("Failed to enable notifications (status $status).")
                 return
             }
-            // Subscribed. Either run the secure handshake, or go straight to Ready (plaintext).
-            if (psk != null) startSecureHandshake() else becomeReady(secure = false)
+            // Subscribed. Decide secure vs plaintext on the handler thread so this can't race
+            // the background PSK load (setPsk also runs through the handler).
+            handler.post { decideSecurity() }
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
@@ -339,6 +357,44 @@ class BleManager(context: Context) {
     }
 
     // --- Secure handshake -----------------------------------------------------------
+
+    /** Runs on the handler thread: pick secure vs plaintext, or park waiting for the key. */
+    private fun decideSecurity() {
+        if (gatt == null) return
+        when {
+            psk != null -> startSecureHandshake()
+            // A passphrase is configured but the PSK hasn't loaded yet — wait for it rather
+            // than silently going plaintext (the device would ignore plaintext and the user
+            // would see a baffling "no response").
+            secureExpected -> beginAwaitPsk()
+            else -> becomeReady(secure = false)
+        }
+    }
+
+    private fun beginAwaitPsk() {
+        // Re-check: the key may have arrived between the dispatch and here.
+        if (psk != null) { startSecureHandshake(); return }
+        awaitingPsk = true
+        _state.value = ConnectionState.Securing(currentName)
+        emitInfo("Waiting for the secure key to load…")
+        handler.removeCallbacks(pskWaitTimeout)
+        handler.postDelayed(pskWaitTimeout, PSK_WAIT_TIMEOUT_MS)
+    }
+
+    /** Called (on the handler thread) when setPsk arrives; start the parked handshake. */
+    private fun startPendingHandshake() {
+        if (!awaitingPsk || psk == null || gatt == null) return
+        awaitingPsk = false
+        handler.removeCallbacks(pskWaitTimeout)
+        startSecureHandshake()
+    }
+
+    private val pskWaitTimeout = Runnable {
+        if (awaitingPsk) {
+            awaitingPsk = false
+            fail("Secure key didn't load in time — reopen the app or re-enter the passphrase.")
+        }
+    }
 
     private fun startSecureHandshake() {
         val key = psk ?: return becomeReady(secure = false)
@@ -394,10 +450,12 @@ class BleManager(context: Context) {
 
     private fun handleNotification(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
         if (characteristic.uuid != BleConstants.RESPONSE_CHAR) return
+        onAnyReply()
         val ch = channel
         if (ch == null) {
             // Plaintext mode: one notification == one reply (may contain '\n').
             val text = value.toString(Charsets.UTF_8)
+            if (captureConsume(text)) return
             updateAuthFromReply(text)
             _incoming.tryEmit(text)
             return
@@ -448,8 +506,104 @@ class BleManager(context: Context) {
 
     private fun emitSecureLine(line: String) {
         val l = line.trimEnd('\r')
+        if (captureConsume(l)) return
         updateAuthFromReply(l)
         _incoming.tryEmit(l)
+    }
+
+    // --- Off-console capture (Status / Device pages) --------------------------------
+    //
+    // Some commands (e.g. `status json`) return a machine-readable reply that should NOT
+    // spam the console. While a capture is armed, inbound reply text is diverted into a
+    // buffer instead of the console. The firmware has no end-of-reply marker, so the
+    // buffer is delivered when the stream goes quiet ([CAPTURE_QUIET_MS]) — the same
+    // idle-delimited strategy the status JSON contract recommends — or, failing any
+    // reply at all, after [CAPTURE_TIMEOUT_MS].
+
+    @Volatile private var captureTag: String? = null
+    private val captureLock = Any()
+    private val captureBuf = StringBuilder()
+    private val pendingCaptures = ArrayDeque<CaptureReq>() // guarded by captureLock
+
+    private data class CaptureReq(val command: String, val tag: String)
+
+    private val captureQuietFlush = Runnable { finishCapture(timedOut = false) }
+    private val captureTimeout = Runnable { finishCapture(timedOut = true) }
+
+    /**
+     * Send [command] and capture its reply off-console under [tag]; the assembled text is
+     * delivered once on [captures]. Captures are serialised — if one is in flight, this one
+     * queues behind it so each reply maps to the right tag (e.g. a `status json` poll and a
+     * `devices json` request can't clobber each other's buffer).
+     */
+    fun sendCaptured(command: String, tag: String) {
+        if (_state.value !is ConnectionState.Ready) {
+            _captures.tryEmit(Capture(tag, "", timedOut = true))
+            return
+        }
+        val startNow = synchronized(captureLock) {
+            if (captureTag != null) {
+                pendingCaptures.addLast(CaptureReq(command, tag)); false
+            } else {
+                true
+            }
+        }
+        if (startNow) startCapture(command, tag)
+    }
+
+    private fun startCapture(command: String, tag: String) {
+        synchronized(captureLock) { captureBuf.setLength(0) }
+        captureTag = tag
+        handler.removeCallbacks(captureTimeout)
+        handler.postDelayed(captureTimeout, CAPTURE_TIMEOUT_MS)
+        sendCommand(command, watch = false)
+    }
+
+    /**
+     * Divert reply text into the active capture. Returns true if it was consumed (and so must
+     * NOT reach the console).
+     *
+     * A capture only claims the JSON document it's waiting for: the first claimed fragment must
+     * start with '{'. Any other line arriving while a capture is armed — a `Login successful`,
+     * an `Authentication required`, an unsolicited broadcast — is NOT swallowed; it falls
+     * through to the console and normal auth handling. This keeps the off-console capture from
+     * ever eating a reply that isn't its target (notably the login reply).
+     */
+    private fun captureConsume(text: String): Boolean {
+        if (captureTag == null) return false
+        val claimed = synchronized(captureLock) {
+            if (captureBuf.isEmpty() && !text.trimStart().startsWith("{")) {
+                return@synchronized false // not the JSON we're waiting for — let it through
+            }
+            captureBuf.append(text)
+            if (!text.endsWith("\n")) captureBuf.append('\n')
+            true
+        }
+        if (!claimed) return false
+        handler.removeCallbacks(captureQuietFlush)
+        handler.postDelayed(captureQuietFlush, CAPTURE_QUIET_MS)
+        return true
+    }
+
+    private fun finishCapture(timedOut: Boolean) {
+        handler.removeCallbacks(captureQuietFlush)
+        handler.removeCallbacks(captureTimeout)
+        val tag = captureTag ?: return
+        captureTag = null
+        val text = synchronized(captureLock) {
+            captureBuf.toString().also { captureBuf.setLength(0) }
+        }.trim()
+        _captures.tryEmit(Capture(tag, text, timedOut = timedOut && text.isEmpty()))
+        // Kick off the next queued capture, if any.
+        val next = synchronized(captureLock) { pendingCaptures.removeFirstOrNull() }
+        if (next != null) startCapture(next.command, next.tag)
+    }
+
+    private fun cancelCapture() {
+        handler.removeCallbacks(captureQuietFlush)
+        handler.removeCallbacks(captureTimeout)
+        captureTag = null
+        synchronized(captureLock) { captureBuf.setLength(0); pendingCaptures.clear() }
     }
 
     private fun updateAuthFromReply(text: String) {
@@ -513,7 +667,14 @@ class BleManager(context: Context) {
     }
 
     /** Send a free-text CLI command (encrypted as a DATA frame when the channel is up). */
-    fun sendCommand(command: String) {
+    fun sendCommand(command: String) = sendCommand(command, watch = true)
+
+    /**
+     * @param watch when true, arm the silent-device watchdog for this command (see
+     * [armCommandWatchdog]). Captured requests pass false — the page that issued them does
+     * its own no-response handling.
+     */
+    private fun sendCommand(command: String, watch: Boolean) {
         if (_state.value !is ConnectionState.Ready) {
             emitError("Not connected.")
             return
@@ -538,6 +699,58 @@ class BleManager(context: Context) {
             }
             enqueue(GattOp.WriteRequest(bytes))
         }
+        if (watch) armCommandWatchdog(command)
+    }
+
+    // --- Silent-device watchdog -----------------------------------------------------
+    //
+    // The firmware replies to every command. A *successful* BLE write that gets no reply is
+    // therefore a strong sign the device couldn't act on it — most often a secure-channel
+    // mismatch (its secret unset / different, or it requires a channel and we're plaintext).
+    // At the BLE layer nothing failed, so without this the app just sits there silently.
+
+    private var lastSentWasLogin = false
+    private var silentStrikes = 0
+    private var silenceAlerted = false
+    private val commandWatchdog = Runnable { onCommandSilence() }
+
+    private fun armCommandWatchdog(command: String) {
+        lastSentWasLogin = command.trimStart().startsWith("login ", ignoreCase = true)
+        handler.removeCallbacks(commandWatchdog)
+        handler.postDelayed(commandWatchdog, COMMAND_SILENCE_MS)
+    }
+
+    /** Any inbound notification proves the device is responding — clear the watchdog. */
+    private fun onAnyReply() {
+        handler.removeCallbacks(commandWatchdog)
+        silentStrikes = 0
+        silenceAlerted = false
+    }
+
+    private fun onCommandSilence() {
+        // Login always replies, so one silent login is enough; other commands need two.
+        val strikesNeeded = if (lastSentWasLogin) 1 else 2
+        silentStrikes++
+        if (silentStrikes >= strikesNeeded && !silenceAlerted) {
+            silenceAlerted = true
+            emitSilenceAlert(lastSentWasLogin)
+        }
+    }
+
+    private fun emitSilenceAlert(login: Boolean) {
+        val base = if (login) {
+            "No response to login — the device received it but didn't reply."
+        } else {
+            "The device isn't responding — it received your command but didn't reply."
+        }
+        val hint = if (secureEstablished) {
+            " The secure channel is on; the device's secret may not match this phone's " +
+                "passphrase (Settings → Secure channel)."
+        } else {
+            " If the device requires a secure channel, set its passphrase in " +
+                "Settings → Secure channel."
+        }
+        emitError("⚠ $base$hint")
     }
 
     /** Read the STATUS characteristic (JSON snapshot — plaintext, outside the channel). */
@@ -584,6 +797,12 @@ class BleManager(context: Context) {
 
     private fun closeGatt() {
         cancelHandshakeTimeout()
+        awaitingPsk = false
+        handler.removeCallbacks(pskWaitTimeout)
+        cancelCapture()
+        handler.removeCallbacks(commandWatchdog)
+        silentStrikes = 0
+        silenceAlerted = false
         handler.removeCallbacks(idleFlush)
         channel = null
         secureEstablished = false
@@ -620,7 +839,11 @@ class BleManager(context: Context) {
 
     companion object {
         private const val HANDSHAKE_TIMEOUT_MS = 6_000L
+        private const val PSK_WAIT_TIMEOUT_MS = 6_000L
         private const val IDLE_FLUSH_MS = 250L
+        private const val CAPTURE_QUIET_MS = 450L
+        private const val CAPTURE_TIMEOUT_MS = 5_000L
+        private const val COMMAND_SILENCE_MS = 3_500L
 
         fun requiredPermissions(): Array<String> =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
