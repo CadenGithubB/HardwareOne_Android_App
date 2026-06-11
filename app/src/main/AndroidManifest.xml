@@ -49,6 +49,7 @@
             android:label="@string/app_name"
             android:resizeableActivity="true"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|keyboardHidden|density|uiMode"
+            android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.HardwareOneConsole">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

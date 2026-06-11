@@ -12,8 +12,8 @@ android {
         applicationId = "com.hardwareone.console"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
     }
 
     buildTypes {
@@ -56,6 +56,9 @@ dependencies {
 
     // Foldable posture awareness (Jetpack WindowManager).
     implementation(libs.androidx.window)
+
+    // Biometric / device-credential prompt for the Keystore-backed credential store.
+    implementation(libs.androidx.biometric)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation(libs.androidx.compose.ui.tooling.preview)

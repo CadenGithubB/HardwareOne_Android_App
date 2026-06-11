@@ -21,7 +21,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,6 +44,12 @@ private val CardShape = RoundedCornerShape(14.dp)
 fun SettingsScreen(
     themePref: ThemePreference,
     onThemeChange: (ThemePreference) -> Unit,
+    securityAvailable: Boolean,
+    hasSavedCredentials: Boolean,
+    savedUsername: String?,
+    autoLogin: Boolean,
+    onAutoLoginChange: (Boolean) -> Unit,
+    onForget: () -> Unit,
     onBack: () -> Unit,
 ) {
     val hw = LocalHwColors.current
@@ -108,6 +117,17 @@ fun SettingsScreen(
                     }
                 }
 
+                Spacer(Modifier.height(12.dp))
+
+                SecurityCard(
+                    securityAvailable = securityAvailable,
+                    hasSavedCredentials = hasSavedCredentials,
+                    savedUsername = savedUsername,
+                    autoLogin = autoLogin,
+                    onAutoLoginChange = onAutoLoginChange,
+                    onForget = onForget,
+                )
+
                 Spacer(Modifier.weight(1f))
 
                 Text(
@@ -119,6 +139,90 @@ fun SettingsScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun SecurityCard(
+    securityAvailable: Boolean,
+    hasSavedCredentials: Boolean,
+    savedUsername: String?,
+    autoLogin: Boolean,
+    onAutoLoginChange: (Boolean) -> Unit,
+    onForget: () -> Unit,
+) {
+    val hw = LocalHwColors.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(CardShape)
+            .background(hw.cardBg)
+            .border(1.dp, hw.cardBorder, CardShape)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = "Security",
+            color = hw.muted,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(vertical = 6.dp),
+        )
+
+        if (!securityAvailable) {
+            Text(
+                text = "Set up a screen lock or biometric to enable secure credential storage.",
+                color = hw.onGradient,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        } else if (!hasSavedCredentials) {
+            Text(
+                text = "No saved credentials. Tick \"Remember\" when you log in to store them securely.",
+                color = hw.onGradient,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Auto-login on connect",
+                        color = hw.onGradient,
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Text(
+                        text = "Saved for ${savedUsername ?: "user"}",
+                        color = hw.muted,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                Switch(
+                    checked = autoLogin,
+                    onCheckedChange = onAutoLoginChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = hw.onGradient,
+                        checkedTrackColor = hw.accent,
+                        uncheckedThumbColor = hw.muted,
+                        uncheckedTrackColor = hw.cardBorder,
+                    ),
+                )
+            }
+            TextButton(
+                onClick = onForget,
+                modifier = Modifier.padding(top = 2.dp),
+            ) {
+                Text("Forget saved credentials", color = hw.danger)
+            }
+        }
+
+        Text(
+            text = "Stored in the device keystore (StrongBox when available), unlocked by a " +
+                "biometric or PIN prompt. The BLE link is currently unencrypted, so credentials " +
+                "are still sent in cleartext over the air.",
+            color = hw.muted,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(top = 8.dp),
+        )
     }
 }
 

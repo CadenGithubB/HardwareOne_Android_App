@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,6 +29,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -73,16 +75,20 @@ fun ConsoleScreen(
     widthSizeClass: WindowWidthSizeClass,
     foldPosture: FoldPosture,
     onOpenSettings: () -> Unit,
+    onLogin: (username: String, password: String, remember: Boolean) -> Unit,
+    onLoginButton: () -> Unit,
 ) {
     val hw = LocalHwColors.current
     val state by vm.connectionState.collectAsState()
     val log by vm.log.collectAsState()
     val devices by vm.scanResults.collectAsState()
     val authenticated by vm.authenticated.collectAsState()
+    val savedUsername by vm.savedUsername.collectAsState()
+    val canRememberCreds = vm.canUseCredentialStore
+    val showLogin by vm.loginDialogVisible.collectAsState()
 
-    // rememberSaveable so a fold/unfold (or rotation) keeps the typed line and dialog.
+    // rememberSaveable so a fold/unfold (or rotation) keeps the typed line.
     var input by rememberSaveable { mutableStateOf("") }
-    var showLogin by rememberSaveable { mutableStateOf(false) }
 
     val ready = state is ConnectionState.Ready
     val connecting = state is ConnectionState.Connecting ||
@@ -90,6 +96,10 @@ fun ConsoleScreen(
         state is ConnectionState.NegotiatingMtu ||
         state is ConnectionState.EnablingNotifications
     val showDevices = !ready && !connecting && devices.isNotEmpty()
+
+    // Compact = narrow portrait phone / folded cover screen. Wider (landscape, unfolded,
+    // tablet) gets a single-row header.
+    val isCompact = widthSizeClass == WindowWidthSizeClass.Compact
 
     // Reusable UI slots so the stacked and tabletop layouts share one source of truth.
     val header: @Composable () -> Unit = {
@@ -103,6 +113,7 @@ fun ConsoleScreen(
             onStatus = vm::readStatus,
             onClear = vm::clearLog,
             onOpenSettings = onOpenSettings,
+            compact = isCompact,
         )
     }
     val deviceList: @Composable () -> Unit = { DeviceList(devices, vm::connect) }
@@ -114,7 +125,7 @@ fun ConsoleScreen(
             enabled = ready,
             authenticated = authenticated,
             onSend = { if (input.isNotBlank()) { vm.send(input); input = "" } },
-            onLogin = { showLogin = true },
+            onLogin = onLoginButton,
         )
     }
 
@@ -130,7 +141,6 @@ fun ConsoleScreen(
                 .imePadding(),
             contentAlignment = Alignment.TopCenter,
         ) {
-            val isCompact = widthSizeClass == WindowWidthSizeClass.Compact
             val columnModifier =
                 if (isCompact) Modifier.fillMaxSize().padding(horizontal = 12.dp)
                 else Modifier.fillMaxSize().widthIn(max = 760.dp).padding(horizontal = 16.dp)
@@ -177,10 +187,12 @@ fun ConsoleScreen(
 
     if (showLogin) {
         LoginDialog(
-            onDismiss = { showLogin = false },
-            onSubmit = { user, pass ->
-                vm.login(user, pass)
-                showLogin = false
+            initialUsername = savedUsername ?: "",
+            canRemember = canRememberCreds,
+            onDismiss = { vm.hideLoginDialog() },
+            onSubmit = { user, pass, remember ->
+                onLogin(user, pass, remember)
+                vm.hideLoginDialog()
             },
         )
     }
@@ -190,6 +202,7 @@ fun ConsoleScreen(
 private fun Header(
     state: ConnectionState,
     authenticated: Boolean,
+    compact: Boolean,
     onScan: () -> Unit,
     onStopScan: () -> Unit,
     onDisconnect: () -> Unit,
@@ -198,62 +211,103 @@ private fun Header(
     onClear: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
-    val hw = LocalHwColors.current
-    Column(
-        modifier = Modifier.padding(top = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
+    val actions: @Composable () -> Unit = {
+        HeaderActions(state, onScan, onStopScan, onDisconnect, onReconnect, onStatus, onClear)
+    }
+    if (compact) {
+        // Narrow: title/status/gear on top, action buttons on a second row.
+        Column(
+            modifier = Modifier.padding(top = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TitleStatus(state, authenticated)
+                GearButton(onOpenSettings)
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) { actions() }
+        }
+    } else {
+        // Wide (landscape / unfolded): everything on one row.
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = "HardwareOne",
-                color = hw.onGradient,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(
-                text = statusLabel(state, authenticated),
-                color = statusColor(state, hw),
-                style = MaterialTheme.typography.labelMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            IconButton(onClick = onOpenSettings) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_settings),
-                    contentDescription = "Settings",
-                    tint = hw.onGradient,
-                )
-            }
+            TitleStatus(state, authenticated)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) { actions() }
+            Spacer(Modifier.width(8.dp))
+            GearButton(onOpenSettings)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            when (state) {
-                is ConnectionState.Scanning -> {
-                    SecondaryButton(onStopScan, "STOP")
-                    Spinner()
-                }
-                is ConnectionState.Ready -> {
-                    SecondaryButton(onStatus, "STATUS")
-                    SecondaryButton(onDisconnect, "DISCONNECT")
-                }
-                is ConnectionState.Connecting,
-                is ConnectionState.DiscoveringServices,
-                is ConnectionState.NegotiatingMtu,
-                is ConnectionState.EnablingNotifications -> {
-                    SecondaryButton(onDisconnect, "CANCEL")
-                    Spinner()
-                }
-                else -> { // Disconnected / Failed
-                    PrimaryButton(onScan, text = "SCAN")
-                    if (state is ConnectionState.Failed) SecondaryButton(onReconnect, "RECONNECT")
-                }
-            }
-            SecondaryButton(onClear, "CLEAR")
+    }
+}
+
+@Composable
+private fun RowScope.TitleStatus(state: ConnectionState, authenticated: Boolean) {
+    val hw = LocalHwColors.current
+    Text(
+        text = "HardwareOne",
+        color = hw.onGradient,
+        style = MaterialTheme.typography.titleLarge,
+        fontWeight = FontWeight.SemiBold,
+    )
+    Spacer(Modifier.width(10.dp))
+    Text(
+        text = statusLabel(state, authenticated),
+        color = statusColor(state, hw),
+        style = MaterialTheme.typography.labelMedium,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(1f),
+    )
+}
+
+@Composable
+private fun HeaderActions(
+    state: ConnectionState,
+    onScan: () -> Unit,
+    onStopScan: () -> Unit,
+    onDisconnect: () -> Unit,
+    onReconnect: () -> Unit,
+    onStatus: () -> Unit,
+    onClear: () -> Unit,
+) {
+    when (state) {
+        is ConnectionState.Scanning -> {
+            SecondaryButton(onStopScan, "STOP")
+            Spinner()
         }
+        is ConnectionState.Ready -> {
+            SecondaryButton(onStatus, "STATUS")
+            SecondaryButton(onDisconnect, "DISCONNECT")
+        }
+        is ConnectionState.Connecting,
+        is ConnectionState.DiscoveringServices,
+        is ConnectionState.NegotiatingMtu,
+        is ConnectionState.EnablingNotifications -> {
+            SecondaryButton(onDisconnect, "CANCEL")
+            Spinner()
+        }
+        else -> { // Disconnected / Failed
+            PrimaryButton(onScan, text = "SCAN")
+            if (state is ConnectionState.Failed) SecondaryButton(onReconnect, "RECONNECT")
+        }
+    }
+    SecondaryButton(onClear, "CLEAR")
+}
+
+@Composable
+private fun GearButton(onOpenSettings: () -> Unit) {
+    IconButton(onClick = onOpenSettings) {
+        Icon(
+            painter = painterResource(R.drawable.ic_settings),
+            contentDescription = "Settings",
+            tint = LocalHwColors.current.onGradient,
+        )
     }
 }
 
@@ -378,11 +432,14 @@ private fun InputBar(
 
 @Composable
 private fun LoginDialog(
+    initialUsername: String,
+    canRemember: Boolean,
     onDismiss: () -> Unit,
-    onSubmit: (String, String) -> Unit,
+    onSubmit: (String, String, Boolean) -> Unit,
 ) {
-    var user by remember { mutableStateOf("") }
+    var user by remember { mutableStateOf(initialUsername) }
     var pass by remember { mutableStateOf("") }
+    var remember by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Log in") },
@@ -402,9 +459,21 @@ private fun LoginDialog(
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 )
+                if (canRemember) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { remember = !remember },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Checkbox(checked = remember, onCheckedChange = { remember = it })
+                        Text("Remember (biometric / PIN)")
+                    }
+                }
             }
         },
-        confirmButton = { TextButton(onClick = { onSubmit(user, pass) }) { Text("LOG IN") } },
+        confirmButton = { TextButton(onClick = { onSubmit(user, pass, remember) }) { Text("LOG IN") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("CANCEL") } },
     )
 }

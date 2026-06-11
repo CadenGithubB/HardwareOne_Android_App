@@ -7,10 +7,12 @@ import com.hardwareone.console.ble.BleManager
 import com.hardwareone.console.ble.BleMessage
 import com.hardwareone.console.ble.ConnectionState
 import com.hardwareone.console.ble.DiscoveredDevice
+import com.hardwareone.console.security.CredentialStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import javax.crypto.Cipher
 
 /** One console line, tagged so the UI can colour it. */
 data class LogEntry(val text: String, val kind: Kind) {
@@ -20,10 +22,34 @@ data class LogEntry(val text: String, val kind: Kind) {
 class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     private val ble = BleManager(app)
+    private val credentials = CredentialStore(app)
 
     val connectionState: StateFlow<ConnectionState> = ble.state
     val scanResults: StateFlow<List<DiscoveredDevice>> = ble.scanResults
     val authenticated: StateFlow<Boolean> = ble.authenticated
+
+    // --- Credential storage state ---
+    /** Device can present a biometric/PIN prompt (a credential is enrolled). */
+    val canUseCredentialStore: Boolean get() = credentials.canAuthenticate()
+
+    private val _autoLogin = MutableStateFlow(credentials.autoLogin)
+    val autoLogin: StateFlow<Boolean> = _autoLogin.asStateFlow()
+
+    private val _hasSavedCredentials = MutableStateFlow(credentials.hasStoredPassword())
+    val hasSavedCredentials: StateFlow<Boolean> = _hasSavedCredentials.asStateFlow()
+
+    private val _savedUsername = MutableStateFlow(credentials.savedUsername)
+    val savedUsername: StateFlow<String?> = _savedUsername.asStateFlow()
+
+    /** Manual login dialog visibility — hoisted so the Activity can open it (e.g. after a
+     *  cancelled biometric prompt) as well as the LOGIN button. */
+    private val _loginDialogVisible = MutableStateFlow(false)
+    val loginDialogVisible: StateFlow<Boolean> = _loginDialogVisible.asStateFlow()
+
+    fun showLoginDialog() { _loginDialogVisible.value = true }
+    fun hideLoginDialog() { _loginDialogVisible.value = false }
+
+    fun allowedAuthenticators(): Int = credentials.allowedAuthenticators()
 
     private val _log = MutableStateFlow<List<LogEntry>>(
         listOf(LogEntry("HardwareOne console — tap SCAN to begin.", LogEntry.Kind.INFO)),
@@ -79,6 +105,48 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     /** Surface an Activity-level message (e.g. permission denied) in the console. */
     fun reportError(message: String) {
         append(LogEntry(message, LogEntry.Kind.ERROR))
+    }
+
+    fun reportInfo(message: String) {
+        append(LogEntry(message, LogEntry.Kind.INFO))
+    }
+
+    // --- Credential storage facade (crypto is pure; the Activity supplies the prompt) ---
+
+    fun setAutoLogin(enabled: Boolean) {
+        credentials.autoLogin = enabled
+        _autoLogin.value = enabled
+    }
+
+    fun forgetCredentials() {
+        credentials.clear()
+        refreshCredentialState()
+        reportInfo("Saved credentials cleared.")
+    }
+
+    /** Cipher to authorise via BiometricPrompt before [commitCredentials]. */
+    fun encryptCipherOrNull(): Cipher? = runCatching { credentials.encryptCipher() }.getOrNull()
+
+    /** Cipher to authorise via BiometricPrompt before [readStoredPassword]. */
+    fun decryptCipherOrNull(): Cipher? = credentials.decryptCipher()
+
+    fun commitCredentials(authedCipher: Cipher, username: String, password: String) {
+        runCatching { credentials.saveCredentials(authedCipher, username, password) }
+            .onSuccess {
+                credentials.autoLogin = true
+                refreshCredentialState()
+                reportInfo("Credentials saved (hardware-encrypted, auth required).")
+            }
+            .onFailure { reportError("Failed to save credentials: ${it.message}") }
+    }
+
+    fun readStoredPassword(authedCipher: Cipher): String? =
+        runCatching { credentials.readPassword(authedCipher) }.getOrNull()
+
+    private fun refreshCredentialState() {
+        _autoLogin.value = credentials.autoLogin
+        _hasSavedCredentials.value = credentials.hasStoredPassword()
+        _savedUsername.value = credentials.savedUsername
     }
 
     // --- Internals ------------------------------------------------------------------
