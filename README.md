@@ -1,16 +1,20 @@
 # HardwareOne Console (Android)
 
-A minimal, **Google-free** Android app that pairs with and messages an **ESP32-S3
-"HardwareOne"** device over **Bluetooth LE**. It is a single-screen, terminal-style
-console: scan → connect → negotiate MTU → subscribe → log in → send CLI commands and
-read the text replies.
+A **Google-free** Android app that scans for, connects to, and messages an **ESP32-S3
+"HardwareOne"** device over **Bluetooth LE** — a single-screen, terminal-style console.
+It speaks the device's plaintext CLI **and, optionally, an app-layer encrypted channel**
+(X25519 + ChaCha20-Poly1305) that makes the link confidential **without any BLE
+pairing/bonding**.
 
 - **No Firebase, no Play Services, no analytics, no Nearby/Fast Pair.** Only
-  `android.bluetooth.*`.
+  `android.bluetooth.*` plus FOSS libraries (AndroidX, BouncyCastle).
 - **No `INTERNET` permission.** The app cannot talk to the network at all.
-- Kotlin + Jetpack Compose, single `Activity`, raw `android.bluetooth` GATT.
-- `minSdk 26` (Android 8.0) → `targetSdk 35` (Android 15). Works on GrapheneOS / AOSP
-  and stock Pixel/Samsung.
+- **Security built in:** optional encrypted channel; login credentials encrypted in the
+  hardware **Keystore** behind **biometric/PIN**; encrypted on-device **log storage**;
+  `FLAG_SECURE` (screenshots/recording blocked).
+- Kotlin + Jetpack Compose, single `Activity`, raw `android.bluetooth` GATT. Foldable-aware.
+- `minSdk 26` (Android 8.0) → `targetSdk 35` (Android 15). GrapheneOS / AOSP / stock
+  Pixel/Samsung.
 - Distributable as a plain **APK** via GitHub Releases / Obtainium / F-Droid.
 
 ---
@@ -109,11 +113,11 @@ BT="$ANDROID_HOME/build-tools/35.0.0"
   app/build/outputs/apk/release/app-release-unsigned.apk \
   app-release-aligned.apk
 "$BT/apksigner" sign --ks hardwareone-release.jks \
-  --out HardwareOne-1.0.0.apk app-release-aligned.apk
-"$BT/apksigner" verify --print-certs HardwareOne-1.0.0.apk
+  --out HardwareOne-1.3.1.apk app-release-aligned.apk
+"$BT/apksigner" verify --print-certs HardwareOne-1.3.1.apk
 ```
 
-`HardwareOne-1.0.0.apk` is what you attach to a GitHub Release. For Obtainium, point it
+`HardwareOne-1.3.1.apk` is what you attach to a GitHub Release. For Obtainium, point it
 at your GitHub releases page. For F-Droid, the
 [reproducible/`fdroiddata`](https://f-droid.org/docs/) workflow uses this same toolchain.
 
@@ -132,46 +136,68 @@ The connection sequence is exactly what the firmware enforces (see
    app never assumes it got the full 514-byte payload.
 4. Enable notifications on **RESPONSE**: `setCharacteristicNotification(true)` **and**
    write `0x0001` to its CCCD (`0x2902`). Skipping the CCCD write = no data.
-5. **Log in** (required by default): send `login <user> <pass>` to **REQUEST**. Success
-   replies `"[ble] Login successful. ..."`; any command before login replies
-   `"Authentication required. ..."`.
-6. Send any CLI command to **REQUEST**; replies arrive asynchronously as **RESPONSE**
-   notifications and are appended to the log (multi-line replies render verbatim).
+5. **If a secure-channel passphrase is configured**, run the handshake (below) before
+   anything else; otherwise talk plaintext.
+6. **Log in** (required by default): send `login <user> <pass>` to **REQUEST**. Success
+   replies `Login successful …`; any command before login replies `Authentication required …`.
+7. Send any CLI command to **REQUEST**; replies arrive asynchronously as **RESPONSE**
+   notifications and stream into the log.
 
-### BLE contract used (Command service)
+### BLE contract (Command service)
 
 | Role | UUID | Properties |
 |------|------|-----------|
 | Command service | `12345678-…-cdef0` | — |
-| REQUEST | `12345678-…-cde01` | Write / Write-No-Response |
-| RESPONSE | `12345678-…-cde02` | Notify (CCCD `0x2902`) |
-| STATUS | `12345678-…-cde03` | Read (JSON) |
+| REQUEST | `12345678-…-cde01` | Write / Write-No-Response — commands **or** secure frames |
+| RESPONSE | `12345678-…-cde02` | Notify (CCCD `0x2902`) — replies **or** secure frames |
+| STATUS | `12345678-…-cde03` | Read (JSON, always plaintext) |
 
-The optional **Data service** (`…-cdef1`) and its sensor/stream characteristics are
-intentionally **ignored in v1**. Standard **Device Information** (`0x180A`) is read once
-after connecting to show the firmware/model/manufacturer strings.
+The optional **Data service** (`…-cdef1`) is ignored. Standard **Device Information**
+(`0x180A`) is read after connecting (firmware/model/manufacturer — shown in the **Device**
+menu).
 
-> **Note on truncation:** each reply is a single notification of up to
-> `negotiated_MTU − 3` bytes. Output longer than that is truncated *by the firmware*
-> today (server-side chunking is a planned firmware feature). The app shows whatever the
-> device sends.
+### Secure channel (optional app-layer encryption)
 
-> **Multi-client:** if more than one client is connected, the firmware prefixes replies
-> with `"[ble conn:<id>] "`. With a single (normal) connection there is no prefix. The
-> app displays replies as received.
+The BLE link uses **no pairing/bonding/link-encryption**. Confidentiality is instead
+**app-layer** — *HardwareOne Secure Channel v1* — riding the same REQUEST/RESPONSE
+characteristics as opaque binary:
+
+- **X25519** key agreement · **HKDF-SHA256** · **ChaCha20-Poly1305** · pre-shared
+  passphrase (PBKDF2). Ephemeral keys per connection ⇒ forward secrecy; the passphrase
+  authenticates the peer.
+- Enable it in **⚙ → Secure channel** with the **same passphrase** set on the device
+  (`blesecret <pass>` then `blesecure on`). The app runs the handshake right after
+  subscribing — the console shows a **"securing"** phase, then `Secure channel established`.
+- `login` and all commands run **inside** the encrypted channel.
+- Implemented in
+  [`SecureChannel.kt`](app/src/main/java/com/hardwareone/console/security/SecureChannel.kt);
+  the byte-for-byte wire contract + interop test vectors are in
+  [`docs/SECURE_CHANNEL_V1.md`](docs/SECURE_CHANNEL_V1.md). The crypto is unit-tested and
+  verified against the firmware's libsodium implementation.
+
+> **Replies & truncation:** in **secure** mode the firmware chunks replies into multiple
+> encrypted frames and the app **reassembles** the stream, so long output arrives intact.
+> In **plaintext** mode a reply is one notification of up to `MTU − 3` bytes and longer
+> output is truncated by the firmware. With more than one client connected the firmware
+> encrypts **per-connection** (secure) or prefixes `"[ble conn:<id>] "` (plaintext).
 
 ---
 
 ## 6. Using the console
 
-1. **SCAN** — finds devices advertising the Command service UUID (matched by UUID, not by
-   name).
-2. Tap a device to connect. The log shows each step (discover → MTU → subscribe → ready).
-3. **LOGIN** — opens a small dialog (password is masked, both on screen and in the log).
-   Or just type `login <user> <pass>` in the input box.
-4. Type commands (e.g. `help`, `whoami`, `status`) and press **SEND** / the keyboard's
-   send key. **STATUS** reads the JSON status characteristic. **DISCONNECT** /
-   **RECONNECT** manage the link.
+1. **SCAN** — finds devices advertising the Command service UUID (by UUID, not name).
+2. Tap a device to connect. The log shows each step (discover → MTU → subscribe →
+   [securing →] ready).
+3. **Log in** — the **LOGIN** button opens a dialog (password masked on screen and in the
+   log), or type `login <user> <pass>`. Optionally tick **Remember** to save the
+   credentials (biometric/PIN-gated, hardware-Keystore-encrypted) and auto-login next time.
+4. Type commands (e.g. `help`, `whoami`) and press **SEND** / the keyboard's send key.
+5. The header packs the controls into one row:
+   - the connection button — **SCAN / STOP / CANCEL / DISCONNECT**,
+   - **Console ▾** — *Save log* / *Clear log*,
+   - **Device ▾** — what's connected (name, address, MTU, secure y/n, firmware, model) plus
+     *Read status*, or *Reconnect* when disconnected,
+   - **⚙** — Settings (appearance, credentials, logs, secure channel).
 
 ---
 
@@ -200,32 +226,52 @@ The app is foldable-aware (`androidx.window` + Compose `WindowSizeClass`):
 
 ```
 app/src/main/
-├── AndroidManifest.xml         BLE permissions (neverForLocation), no INTERNET
+├── AndroidManifest.xml          BLE perms (neverForLocation), FLAG_SECURE, no INTERNET
 ├── java/com/hardwareone/console/
-│   ├── MainActivity.kt         single Activity; runtime permissions + BT-enable prompt
+│   ├── MainActivity.kt          single Activity; permissions, BT-enable, biometric, nav
 │   ├── ble/
-│   │   ├── BleConstants.kt      UUIDs + limits
-│   │   ├── ConnectionState.kt   sealed connection phases + data types
-│   │   └── BleManager.kt        coroutine-friendly GATT state machine + op queue
+│   │   ├── BleConstants.kt       UUIDs + limits
+│   │   ├── ConnectionState.kt    connection phases + DeviceInfo / DiscoveredDevice
+│   │   └── BleManager.kt         GATT state machine; secure-channel framing + reassembly
+│   ├── security/
+│   │   ├── SecureChannel.kt      X25519/HKDF/ChaCha20-Poly1305 handshake (BouncyCastle)
+│   │   ├── CredentialStore.kt    login password — auth-gated AES-GCM Keystore
+│   │   ├── SecretBox.kt          channel passphrase — non-auth AES-GCM Keystore (at rest)
+│   │   └── LogVault.kt           encrypted log files (RSA-wrapped AES-GCM; biometric to read)
 │   └── ui/
-│       ├── ConsoleViewModel.kt  flows → log entries; command echo + password masking
-│       ├── ConsoleScreen.kt     Compose console (responsive + tabletop layouts)
-│       ├── FoldPosture.kt       Jetpack WindowManager → fold posture for the UI
-│       └── theme/Theme.kt       dark "terminal" Material3 theme
-└── res/                        launcher icon (adaptive), strings, window theme
+│       ├── ConsoleViewModel.kt   flows → log; command echo, masking, store facades
+│       ├── ConsoleScreen.kt      Compose console (responsive + tabletop; Console/Device menus)
+│       ├── SettingsScreen.kt     appearance · credentials · logs · secure channel
+│       ├── SavedLogsScreen.kt    encrypted saved-log list
+│       ├── LogViewerScreen.kt    decrypted viewer + plaintext export
+│       ├── FoldPosture.kt        Jetpack WindowManager → fold posture
+│       ├── ThemePreference.kt    theme persistence
+│       └── theme/Theme.kt        light/dark "glassmorphism" Material3 theme
+├── res/  (+ res/values-night/)  adaptive icon, strings, day/night window themes
+└── test/ …/security/            SecureChannel unit tests + interop vectors
+docs/SECURE_CHANNEL_V1.md         the secure-channel wire contract (app ↔ firmware)
 ```
 
 ---
 
 ## 9. Security & privacy notes
 
-- The BLE link itself is **unencrypted and unbonded** by the device's design; auth is
-  **app-layer** (`login`). Treat anything sent over it accordingly — this app simply
-  speaks that protocol.
-- The app keeps the **password out of the on-screen log** (masked) but sends it verbatim
-  over the (unencrypted) link, as the protocol requires.
-- `allowBackup="false"` — nothing is backed up off-device.
-- No network permission, no third-party SDKs, no telemetry. What you build is what runs.
+- **Confidentiality:** the link can be **app-layer encrypted** (Secure Channel v1 — X25519
+  + ChaCha20-Poly1305; see §5), using **no BLE pairing/bonding** — so there are no OS-level
+  bonds to manage or leak. Without a passphrase the link is plaintext (the device's
+  default). `login` is required either way (authorization), on top of encryption
+  (confidentiality). If cleartext ever appears on a link that should be encrypted, the app
+  **flags it and drops it** rather than displaying it.
+- **Credentials at rest:** a saved login password is encrypted with a **hardware Keystore**
+  key (StrongBox/TEE) gated by **biometric/PIN**; the channel passphrase uses a non-auth
+  Keystore key (encrypted at rest, read automatically at connect). Passwords are **masked**
+  in the on-screen log, and the password field uses a no-suggestions keyboard.
+- **Saved logs** are encrypted on device (Keystore envelope; biometric/PIN to open) in
+  app-private storage. Plaintext only leaves via an explicit **Export**.
+- **`FLAG_SECURE`** (always on, not user-toggleable): blocks screenshots, screen recording,
+  screen-share, and the recents preview.
+- `allowBackup="false"`; **no `INTERNET` permission**; no third-party analytics/SDKs (only
+  FOSS AndroidX + BouncyCastle). What you build is what runs.
 
 ---
 

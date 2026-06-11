@@ -34,6 +34,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     val connectionState: StateFlow<ConnectionState> = ble.state
     val scanResults: StateFlow<List<DiscoveredDevice>> = ble.scanResults
     val authenticated: StateFlow<Boolean> = ble.authenticated
+    val deviceInfo: StateFlow<com.hardwareone.console.ble.DeviceInfo?> = ble.deviceInfo
 
     // --- Credential storage state ---
     /** Device can present a biometric/PIN prompt (a credential is enrolled). */

@@ -11,10 +11,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
@@ -78,7 +81,7 @@ fun SettingsScreen(
             .background(Brush.linearGradient(hw.gradient)),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().systemBarsPadding(),
+            modifier = Modifier.fillMaxSize().systemBarsPadding().imePadding(),
             contentAlignment = Alignment.TopCenter,
         ) {
             Column(
@@ -110,69 +113,70 @@ fun SettingsScreen(
 
                 Spacer(Modifier.height(8.dp))
 
-                // Appearance card
+                // Scrollable cards (the top bar above stays fixed).
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(CardShape)
-                        .background(hw.cardBg)
-                        .border(1.dp, hw.cardBorder, CardShape)
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Text(
-                        text = "Appearance",
-                        color = hw.muted,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(vertical = 6.dp),
+                    // Appearance card
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(CardShape)
+                            .background(hw.cardBg)
+                            .border(1.dp, hw.cardBorder, CardShape)
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            text = "Appearance",
+                            color = hw.muted,
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.padding(vertical = 6.dp),
+                        )
+                        ThemeOptionRow("System default", themePref == ThemePreference.SYSTEM) {
+                            onThemeChange(ThemePreference.SYSTEM)
+                        }
+                        ThemeOptionRow("Light", themePref == ThemePreference.LIGHT) {
+                            onThemeChange(ThemePreference.LIGHT)
+                        }
+                        ThemeOptionRow("Dark", themePref == ThemePreference.DARK) {
+                            onThemeChange(ThemePreference.DARK)
+                        }
+                    }
+
+                    SecurityCard(
+                        securityAvailable = securityAvailable,
+                        hasSavedCredentials = hasSavedCredentials,
+                        savedUsername = savedUsername,
+                        autoLogin = autoLogin,
+                        onAutoLoginChange = onAutoLoginChange,
+                        onForget = onForget,
                     )
-                    ThemeOptionRow("System default", themePref == ThemePreference.SYSTEM) {
-                        onThemeChange(ThemePreference.SYSTEM)
-                    }
-                    ThemeOptionRow("Light", themePref == ThemePreference.LIGHT) {
-                        onThemeChange(ThemePreference.LIGHT)
-                    }
-                    ThemeOptionRow("Dark", themePref == ThemePreference.DARK) {
-                        onThemeChange(ThemePreference.DARK)
-                    }
+
+                    LogsCard(
+                        logsAvailable = logsAvailable,
+                        autoSaveLogs = autoSaveLogs,
+                        onAutoSaveLogsChange = onAutoSaveLogsChange,
+                        onOpenSavedLogs = onOpenSavedLogs,
+                    )
+
+                    SecureChannelCard(
+                        configured = secureChannelConfigured,
+                        onSet = onSetChannelPassphrase,
+                        onClear = onClearChannelPassphrase,
+                    )
+
+                    Text(
+                        text = "HardwareOne Console v${BuildConfig.VERSION_NAME}",
+                        color = hw.muted,
+                        style = MaterialTheme.typography.labelSmall,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    )
                 }
-
-                Spacer(Modifier.height(12.dp))
-
-                SecurityCard(
-                    securityAvailable = securityAvailable,
-                    hasSavedCredentials = hasSavedCredentials,
-                    savedUsername = savedUsername,
-                    autoLogin = autoLogin,
-                    onAutoLoginChange = onAutoLoginChange,
-                    onForget = onForget,
-                )
-
-                Spacer(Modifier.height(12.dp))
-
-                LogsCard(
-                    logsAvailable = logsAvailable,
-                    autoSaveLogs = autoSaveLogs,
-                    onAutoSaveLogsChange = onAutoSaveLogsChange,
-                    onOpenSavedLogs = onOpenSavedLogs,
-                )
-
-                Spacer(Modifier.height(12.dp))
-
-                SecureChannelCard(
-                    configured = secureChannelConfigured,
-                    onSet = onSetChannelPassphrase,
-                    onClear = onClearChannelPassphrase,
-                )
-
-                Spacer(Modifier.weight(1f))
-
-                Text(
-                    text = "HardwareOne Console v${BuildConfig.VERSION_NAME}",
-                    color = hw.muted,
-                    style = MaterialTheme.typography.labelSmall,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                )
             }
         }
     }

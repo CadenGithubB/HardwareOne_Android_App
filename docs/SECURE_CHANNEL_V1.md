@@ -6,6 +6,12 @@ pairing/bonding/link-encryption** (that approach is abandoned; it created unremo
 bonds on GrapheneOS). The app side below is implemented and unit-test-verified
 (`SecureChannel.kt`); the test vectors in §10 come from that implementation.
 
+> **Status: verified working end-to-end on hardware.** Handshake → login → commands →
+> full decrypted output, interoperating with the firmware's libsodium implementation
+> (which reproduces §10's vectors exactly). One early issue — the firmware notifying path A
+> (debug/broadcast output) as plaintext while secured — was caught by the app and fixed
+> firmware-side (encrypt at the `sendBLEResponse()` chokepoint, per §9).
+
 ## 1. GATT layer (unchanged)
 - Same Command service: **REQUEST** (`…de01`, write) app→device, **RESPONSE** (`…de02`,
   notify + CCCD `0x2902`) device→app, **STATUS** (`…de03`, read), Device Info `180A`.

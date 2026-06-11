@@ -7,8 +7,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -33,6 +31,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -65,6 +66,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hardwareone.console.R
 import com.hardwareone.console.ble.ConnectionState
+import com.hardwareone.console.ble.DeviceInfo
 import com.hardwareone.console.ble.DiscoveredDevice
 import com.hardwareone.console.ui.theme.HwColors
 import com.hardwareone.console.ui.theme.LocalHwColors
@@ -89,6 +91,7 @@ fun ConsoleScreen(
     val savedUsername by vm.savedUsername.collectAsState()
     val canRememberCreds = vm.canUseCredentialStore
     val showLogin by vm.loginDialogVisible.collectAsState()
+    val deviceInfo by vm.deviceInfo.collectAsState()
 
     // rememberSaveable so a fold/unfold (or rotation) keeps the typed line.
     var input by rememberSaveable { mutableStateOf("") }
@@ -111,15 +114,16 @@ fun ConsoleScreen(
         Header(
             state = state,
             authenticated = authenticated,
+            deviceInfo = deviceInfo,
+            compact = isCompact,
             onScan = onScanClicked,
             onStopScan = vm::stopScan,
             onDisconnect = vm::disconnect,
             onReconnect = vm::reconnect,
-            onStatus = vm::readStatus,
+            onReadStatus = vm::readStatus,
             onClear = vm::clearLog,
             onSaveLog = saveLog,
             onOpenSettings = onOpenSettings,
-            compact = isCompact,
         )
     }
     val deviceList: @Composable () -> Unit = { DeviceList(devices, vm::connect) }
@@ -204,26 +208,27 @@ fun ConsoleScreen(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Header(
     state: ConnectionState,
     authenticated: Boolean,
+    deviceInfo: DeviceInfo?,
     compact: Boolean,
     onScan: () -> Unit,
     onStopScan: () -> Unit,
     onDisconnect: () -> Unit,
     onReconnect: () -> Unit,
-    onStatus: () -> Unit,
+    onReadStatus: () -> Unit,
     onClear: () -> Unit,
     onSaveLog: (() -> Unit)?,
     onOpenSettings: () -> Unit,
 ) {
-    val actions: @Composable () -> Unit = {
-        HeaderActions(state, onScan, onStopScan, onDisconnect, onReconnect, onStatus, onClear, onSaveLog)
+    val controls: @Composable () -> Unit = {
+        PrimaryConnectionButton(state, onScan, onStopScan, onDisconnect)
+        ConsoleMenu(onSaveLog, onClear)
+        DeviceMenu(state, authenticated, deviceInfo, onReadStatus, onReconnect)
     }
     if (compact) {
-        // Narrow: title/status/gear on top, action buttons on a second row.
         Column(
             modifier = Modifier.padding(top = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -232,16 +237,12 @@ private fun Header(
                 TitleStatus(state, authenticated)
                 GearButton(onOpenSettings)
             }
-            // FlowRow so the action buttons wrap onto another line instead of being
-            // squeezed when they don't fit a narrow (portrait/cover) width.
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
+            Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) { actions() }
+                verticalAlignment = Alignment.CenterVertically,
+            ) { controls() }
         }
     } else {
-        // Wide (landscape / unfolded): everything on one row.
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -250,10 +251,126 @@ private fun Header(
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-            ) { actions() }
+            ) { controls() }
             Spacer(Modifier.width(8.dp))
             GearButton(onOpenSettings)
         }
+    }
+}
+
+/** Single state-driven connection button (SCAN / STOP / CANCEL / DISCONNECT). */
+@Composable
+private fun PrimaryConnectionButton(
+    state: ConnectionState,
+    onScan: () -> Unit,
+    onStopScan: () -> Unit,
+    onDisconnect: () -> Unit,
+) {
+    when (state) {
+        is ConnectionState.Scanning -> {
+            SecondaryButton(onStopScan, "STOP")
+            Spinner()
+        }
+        is ConnectionState.Connecting,
+        is ConnectionState.DiscoveringServices,
+        is ConnectionState.NegotiatingMtu,
+        is ConnectionState.EnablingNotifications,
+        is ConnectionState.Securing -> {
+            SecondaryButton(onDisconnect, "CANCEL")
+            Spinner()
+        }
+        is ConnectionState.Ready -> SecondaryButton(onDisconnect, "DISCONNECT")
+        else -> PrimaryButton(onScan, text = "SCAN")
+    }
+}
+
+/** "Console ▾" menu: save / clear the log. */
+@Composable
+private fun ConsoleMenu(onSaveLog: (() -> Unit)?, onClear: () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        MenuButton("Console") { expanded = true }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            if (onSaveLog != null) {
+                DropdownMenuItem(
+                    text = { Text("Save log") },
+                    onClick = { expanded = false; onSaveLog() },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("Clear log") },
+                onClick = { expanded = false; onClear() },
+            )
+        }
+    }
+}
+
+/** "Device ▾" menu: what's connected, plus status/reconnect actions. */
+@Composable
+private fun DeviceMenu(
+    state: ConnectionState,
+    authenticated: Boolean,
+    deviceInfo: DeviceInfo?,
+    onReadStatus: () -> Unit,
+    onReconnect: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        MenuButton("Device") { expanded = true }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            if (deviceInfo != null) {
+                MenuInfo("Name", deviceInfo.name)
+                MenuInfo("Address", deviceInfo.address)
+                MenuInfo("State", statusLabel(state, authenticated).dropWhile { !it.isLetter() })
+                if (deviceInfo.mtu > 0) MenuInfo("MTU", deviceInfo.mtu.toString())
+                MenuInfo("Secure", if (deviceInfo.secure) "yes" else "no")
+                deviceInfo.firmware?.let { MenuInfo("Firmware", it) }
+                deviceInfo.model?.let { MenuInfo("Model", it) }
+                if (state is ConnectionState.Ready) {
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("Read status") },
+                        onClick = { expanded = false; onReadStatus() },
+                    )
+                }
+            } else {
+                DropdownMenuItem(text = { Text("Not connected") }, enabled = false, onClick = {})
+                DropdownMenuItem(
+                    text = { Text("Reconnect") },
+                    onClick = { expanded = false; onReconnect() },
+                )
+            }
+        }
+    }
+}
+
+/** Outlined button with a dropdown caret, styled for the gradient. */
+@Composable
+private fun MenuButton(label: String, onClick: () -> Unit) {
+    val hw = LocalHwColors.current
+    OutlinedButton(
+        onClick = onClick,
+        border = BorderStroke(1.dp, hw.cardBorder),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = hw.onGradient),
+    ) { Text("$label ▾") }
+}
+
+/** Read-only label/value row inside a dropdown menu. */
+@Composable
+private fun MenuInfo(label: String, value: String) {
+    Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 3.dp)) {
+        Text(
+            text = "$label: ",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -275,43 +392,6 @@ private fun RowScope.TitleStatus(state: ConnectionState, authenticated: Boolean)
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier.weight(1f),
     )
-}
-
-@Composable
-private fun HeaderActions(
-    state: ConnectionState,
-    onScan: () -> Unit,
-    onStopScan: () -> Unit,
-    onDisconnect: () -> Unit,
-    onReconnect: () -> Unit,
-    onStatus: () -> Unit,
-    onClear: () -> Unit,
-    onSaveLog: (() -> Unit)?,
-) {
-    when (state) {
-        is ConnectionState.Scanning -> {
-            SecondaryButton(onStopScan, "STOP")
-            Spinner()
-        }
-        is ConnectionState.Ready -> {
-            SecondaryButton(onStatus, "STATUS")
-            SecondaryButton(onDisconnect, "DISCONNECT")
-        }
-        is ConnectionState.Connecting,
-        is ConnectionState.DiscoveringServices,
-        is ConnectionState.NegotiatingMtu,
-        is ConnectionState.EnablingNotifications,
-        is ConnectionState.Securing -> {
-            SecondaryButton(onDisconnect, "CANCEL")
-            Spinner()
-        }
-        else -> { // Disconnected / Failed
-            PrimaryButton(onScan, text = "SCAN")
-            if (state is ConnectionState.Failed) SecondaryButton(onReconnect, "RECONNECT")
-        }
-    }
-    if (onSaveLog != null) SecondaryButton(onSaveLog, "SAVE")
-    SecondaryButton(onClear, "CLEAR")
 }
 
 @Composable

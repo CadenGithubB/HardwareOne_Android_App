@@ -32,6 +32,17 @@ data class DiscoveredDevice(
     val rssi: Int,
 )
 
+/** Live details of the connected device, for the "Device" menu. Null when disconnected. */
+data class DeviceInfo(
+    val name: String,
+    val address: String,
+    val mtu: Int = 0,
+    val secure: Boolean = false,
+    val firmware: String? = null,
+    val model: String? = null,
+    val manufacturer: String? = null,
+)
+
 /** A line destined for the on-screen console, tagged for colouring. */
 data class BleMessage(val text: String, val kind: Kind) {
     enum class Kind { INCOMING, INFO, ERROR }

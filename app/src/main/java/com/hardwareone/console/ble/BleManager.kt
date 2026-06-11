@@ -66,6 +66,9 @@ class BleManager(context: Context) {
     private val _authenticated = MutableStateFlow(false)
     val authenticated: StateFlow<Boolean> = _authenticated.asStateFlow()
 
+    private val _deviceInfo = MutableStateFlow<DeviceInfo?>(null)
+    val deviceInfo: StateFlow<DeviceInfo?> = _deviceInfo.asStateFlow()
+
     /** Plain-text reply lines for the console. */
     private val _incoming = MutableSharedFlow<String>(extraBufferCapacity = 256)
     val incoming: SharedFlow<String> = _incoming.asSharedFlow()
@@ -193,6 +196,7 @@ class BleManager(context: Context) {
         currentName = runCatching { device.name }.getOrNull() ?: "HardwareOne"
         userInitiatedDisconnect = false
         _authenticated.value = false
+        _deviceInfo.value = DeviceInfo(name = currentName, address = device.address)
 
         _state.value = ConnectionState.Connecting(currentName)
         emitInfo("Connecting to $currentName (${device.address})…")
@@ -327,6 +331,7 @@ class BleManager(context: Context) {
     }
 
     private fun becomeReady(secure: Boolean) {
+        _deviceInfo.value = _deviceInfo.value?.copy(mtu = negotiatedMtu, secure = secure)
         _state.value = ConnectionState.Ready(currentName, negotiatedMtu)
         if (secure) emitInfo("Secure channel established. Log in with:  login <username> <password>")
         else emitInfo("Ready. Log in with:  login <username> <password>")
@@ -401,8 +406,21 @@ class BleManager(context: Context) {
             handleHandshakeMessage(ch, value)
             return
         }
-        // Established: decrypt a DATA frame and stream it. Foreign/replayed frames → null.
-        ch.decrypt(value)?.let { appendSecureRx(String(it, Charsets.UTF_8)) }
+        // Established: decrypt a DATA frame and stream it.
+        val pt = ch.decrypt(value)
+        if (pt != null) {
+            appendSecureRx(String(pt, Charsets.UTF_8))
+        } else {
+            // Diagnostic: a RESPONSE we couldn't decrypt while secured. Distinguish a
+            // plaintext leak (path A unencrypted) from a counter/tag mismatch.
+            val looksAscii = value.isNotEmpty() && value.all { (it.toInt() and 0xff) in 0x09..0x7e }
+            if (looksAscii) {
+                emitError("⟂ plaintext on secure link: \"${value.toString(Charsets.UTF_8).take(120)}\"")
+            } else {
+                val b0 = value.firstOrNull()?.let { "0x%02x".format(it) } ?: "—"
+                emitError("⟂ undecryptable secure frame (${value.size} B, first byte $b0)")
+            }
+        }
     }
 
     /** Reassemble the device's chunked, unframed reply stream into console lines. */
@@ -448,9 +466,18 @@ class BleManager(context: Context) {
         if (text.isEmpty()) return
         when (characteristic.uuid) {
             BleConstants.STATUS_CHAR -> emitInfo("status: $text")
-            BleConstants.FIRMWARE_CHAR -> emitInfo("firmware: $text")
-            BleConstants.MODEL_CHAR -> emitInfo("model: $text")
-            BleConstants.MANUFACTURER_CHAR -> emitInfo("manufacturer: $text")
+            BleConstants.FIRMWARE_CHAR -> {
+                emitInfo("firmware: $text")
+                _deviceInfo.value = _deviceInfo.value?.copy(firmware = text)
+            }
+            BleConstants.MODEL_CHAR -> {
+                emitInfo("model: $text")
+                _deviceInfo.value = _deviceInfo.value?.copy(model = text)
+            }
+            BleConstants.MANUFACTURER_CHAR -> {
+                emitInfo("manufacturer: $text")
+                _deviceInfo.value = _deviceInfo.value?.copy(manufacturer = text)
+            }
         }
     }
 
@@ -567,6 +594,7 @@ class BleManager(context: Context) {
         requestChar = null
         responseChar = null
         statusChar = null
+        _deviceInfo.value = null
     }
 
     private fun fail(reason: String) {
