@@ -7,6 +7,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -57,6 +59,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -94,7 +97,8 @@ fun ConsoleScreen(
     val connecting = state is ConnectionState.Connecting ||
         state is ConnectionState.DiscoveringServices ||
         state is ConnectionState.NegotiatingMtu ||
-        state is ConnectionState.EnablingNotifications
+        state is ConnectionState.EnablingNotifications ||
+        state is ConnectionState.Securing
     val showDevices = !ready && !connecting && devices.isNotEmpty()
 
     // Compact = narrow portrait phone / folded cover screen. Wider (landscape, unfolded,
@@ -102,6 +106,7 @@ fun ConsoleScreen(
     val isCompact = widthSizeClass == WindowWidthSizeClass.Compact
 
     // Reusable UI slots so the stacked and tabletop layouts share one source of truth.
+    val saveLog: (() -> Unit)? = if (vm.canSaveLogs) ({ vm.saveCurrentLog() }) else null
     val header: @Composable () -> Unit = {
         Header(
             state = state,
@@ -112,6 +117,7 @@ fun ConsoleScreen(
             onReconnect = vm::reconnect,
             onStatus = vm::readStatus,
             onClear = vm::clearLog,
+            onSaveLog = saveLog,
             onOpenSettings = onOpenSettings,
             compact = isCompact,
         )
@@ -198,6 +204,7 @@ fun ConsoleScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Header(
     state: ConnectionState,
@@ -209,10 +216,11 @@ private fun Header(
     onReconnect: () -> Unit,
     onStatus: () -> Unit,
     onClear: () -> Unit,
+    onSaveLog: (() -> Unit)?,
     onOpenSettings: () -> Unit,
 ) {
     val actions: @Composable () -> Unit = {
-        HeaderActions(state, onScan, onStopScan, onDisconnect, onReconnect, onStatus, onClear)
+        HeaderActions(state, onScan, onStopScan, onDisconnect, onReconnect, onStatus, onClear, onSaveLog)
     }
     if (compact) {
         // Narrow: title/status/gear on top, action buttons on a second row.
@@ -224,9 +232,12 @@ private fun Header(
                 TitleStatus(state, authenticated)
                 GearButton(onOpenSettings)
             }
-            Row(
+            // FlowRow so the action buttons wrap onto another line instead of being
+            // squeezed when they don't fit a narrow (portrait/cover) width.
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) { actions() }
         }
     } else {
@@ -275,6 +286,7 @@ private fun HeaderActions(
     onReconnect: () -> Unit,
     onStatus: () -> Unit,
     onClear: () -> Unit,
+    onSaveLog: (() -> Unit)?,
 ) {
     when (state) {
         is ConnectionState.Scanning -> {
@@ -288,7 +300,8 @@ private fun HeaderActions(
         is ConnectionState.Connecting,
         is ConnectionState.DiscoveringServices,
         is ConnectionState.NegotiatingMtu,
-        is ConnectionState.EnablingNotifications -> {
+        is ConnectionState.EnablingNotifications,
+        is ConnectionState.Securing -> {
             SecondaryButton(onDisconnect, "CANCEL")
             Spinner()
         }
@@ -297,6 +310,7 @@ private fun HeaderActions(
             if (state is ConnectionState.Failed) SecondaryButton(onReconnect, "RECONNECT")
         }
     }
+    if (onSaveLog != null) SecondaryButton(onSaveLog, "SAVE")
     SecondaryButton(onClear, "CLEAR")
 }
 
@@ -406,7 +420,10 @@ private fun InputBar(
             singleLine = true,
             shape = CardShape,
             placeholder = { Text(if (enabled) "type a command (e.g. help)" else "connect to begin") },
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardOptions = KeyboardOptions(
+                autoCorrectEnabled = false,
+                imeAction = ImeAction.Send,
+            ),
             keyboardActions = KeyboardActions(onSend = { onSend() }),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = hw.onGradient,
@@ -457,7 +474,11 @@ private fun LoginDialog(
                     label = { Text("password") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false,
+                        imeAction = ImeAction.Done,
+                    ),
                 )
                 if (canRemember) {
                     Row(
@@ -532,6 +553,7 @@ private fun statusLabel(state: ConnectionState, authenticated: Boolean): String 
     is ConnectionState.DiscoveringServices -> "◌ discovering"
     is ConnectionState.NegotiatingMtu -> "◌ mtu"
     is ConnectionState.EnablingNotifications -> "◌ subscribing"
+    is ConnectionState.Securing -> "◌ securing"
     is ConnectionState.Ready ->
         if (authenticated) "● online (mtu ${state.mtu})" else "● connected — login required"
     is ConnectionState.Failed -> "● ${state.reason}"

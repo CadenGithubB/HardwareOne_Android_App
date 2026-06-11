@@ -17,8 +17,11 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
+import com.hardwareone.console.security.SecureChannel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -31,19 +34,20 @@ import kotlinx.coroutines.flow.asStateFlow
  * drives the firmware-mandated connect sequence and exposes everything the UI needs as
  * flows.
  *
- * Threading: GATT callbacks arrive on a binder thread. We only ever touch
- * [MutableStateFlow.value] (thread-safe) and [MutableSharedFlow.tryEmit] (thread-safe,
- * non-suspending) from those callbacks, so no extra synchronisation is needed for state.
- * GATT *operations* are serialised through a tiny queue ([opQueue]) because Android
- * allows only one outstanding GATT request at a time.
+ * Security is **app-layer** (HardwareOne Secure Channel v1): no BLE pairing/bonding. When a
+ * PSK is configured ([setPsk]) the manager runs the X25519/ChaCha20-Poly1305 handshake
+ * after subscribing and before "Ready", then frames all REQUEST/RESPONSE traffic through
+ * [SecureChannel]. With no PSK it talks plaintext, exactly as the firmware's plaintext mode.
  *
- * All BLE calls are guarded by [hasConnectPermission]/[hasScanPermission]; the Activity
- * is responsible for actually requesting them at runtime.
+ * Threading: GATT callbacks arrive on a binder thread; we only touch thread-safe
+ * [MutableStateFlow.value] / [MutableSharedFlow.tryEmit]. GATT operations are serialised
+ * through a tiny queue. Timeouts / idle flushing run on a main-thread [Handler].
  */
 @SuppressLint("MissingPermission") // every BLE call site is guarded by a runtime check.
 class BleManager(context: Context) {
 
     private val appContext = context.applicationContext
+    private val handler = Handler(Looper.getMainLooper())
 
     private val bluetoothManager: BluetoothManager? =
         ContextCompat.getSystemService(appContext, BluetoothManager::class.java)
@@ -62,8 +66,8 @@ class BleManager(context: Context) {
     private val _authenticated = MutableStateFlow(false)
     val authenticated: StateFlow<Boolean> = _authenticated.asStateFlow()
 
-    /** Plain-text replies from the device (one notification == one emission). */
-    private val _incoming = MutableSharedFlow<String>(extraBufferCapacity = 128)
+    /** Plain-text reply lines for the console. */
+    private val _incoming = MutableSharedFlow<String>(extraBufferCapacity = 256)
     val incoming: SharedFlow<String> = _incoming.asSharedFlow()
 
     /** Connection lifecycle / info / error lines for the console. */
@@ -72,6 +76,21 @@ class BleManager(context: Context) {
 
     val isBluetoothSupported: Boolean get() = adapter != null
     val isBluetoothEnabled: Boolean get() = adapter?.isEnabled == true
+
+    // --- Secure channel -------------------------------------------------------------
+
+    @Volatile private var psk: ByteArray? = null
+    private var channel: SecureChannel? = null
+    private var secureEstablished = false
+    private val rxLock = Any()
+    private val rxBuffer = StringBuilder()
+
+    /** Configure (or clear) the pre-shared key. Takes effect on the next connect. */
+    fun setPsk(newPsk: ByteArray?) {
+        psk = newPsk
+    }
+
+    val secureModeConfigured: Boolean get() = psk != null
 
     // --- Internal connection state --------------------------------------------------
 
@@ -85,19 +104,18 @@ class BleManager(context: Context) {
     private var negotiatedMtu: Int = 23
     private var userInitiatedDisconnect = false
 
+    /** Unregister/teardown. Call from ViewModel.onCleared(). */
+    fun release() {
+        closeGatt()
+    }
+
     // --- Scanning -------------------------------------------------------------------
 
     private var scanning = false
 
     private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            addScanResult(result)
-        }
-
-        override fun onBatchScanResults(results: MutableList<ScanResult>) {
-            results.forEach(::addScanResult)
-        }
-
+        override fun onScanResult(callbackType: Int, result: ScanResult) = addScanResult(result)
+        override fun onBatchScanResults(results: MutableList<ScanResult>) = results.forEach(::addScanResult)
         override fun onScanFailed(errorCode: Int) {
             scanning = false
             emitError("Scan failed (code $errorCode).")
@@ -106,18 +124,15 @@ class BleManager(context: Context) {
     }
 
     private fun addScanResult(result: ScanResult) {
-        val record = result.scanRecord
-        val name = record?.deviceName ?: "HardwareOne"
         val device = DiscoveredDevice(
             address = result.device.address,
-            name = name,
+            name = result.scanRecord?.deviceName ?: "HardwareOne",
             rssi = result.rssi,
         )
         val current = _scanResults.value
         val idx = current.indexOfFirst { it.address == device.address }
         _scanResults.value =
-            if (idx >= 0) current.toMutableList().also { it[idx] = device }
-            else current + device
+            if (idx >= 0) current.toMutableList().also { it[idx] = device } else current + device
     }
 
     fun startScan() {
@@ -135,16 +150,13 @@ class BleManager(context: Context) {
             emitError("BLUETOOTH_SCAN permission not granted.")
             return
         }
-
         _scanResults.value = emptyList()
-        // Match by advertised service UUID, not by name.
         val filter = ScanFilter.Builder()
             .setServiceUuid(ParcelUuid(BleConstants.COMMAND_SERVICE))
             .build()
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
-
         scanning = true
         _state.value = ConnectionState.Scanning
         emitInfo("Scanning for HardwareOne…")
@@ -155,9 +167,7 @@ class BleManager(context: Context) {
         if (!scanning) return
         scanning = false
         if (hasScanPermission()) scanner?.stopScan(scanCallback)
-        if (_state.value is ConnectionState.Scanning) {
-            _state.value = ConnectionState.Disconnected
-        }
+        if (_state.value is ConnectionState.Scanning) _state.value = ConnectionState.Disconnected
     }
 
     // --- Connect sequence -----------------------------------------------------------
@@ -177,7 +187,7 @@ class BleManager(context: Context) {
             return
         }
         stopScan()
-        closeGatt() // drop any previous session first
+        closeGatt()
 
         lastDevice = device
         currentName = runCatching { device.name }.getOrNull() ?: "HardwareOne"
@@ -186,11 +196,9 @@ class BleManager(context: Context) {
 
         _state.value = ConnectionState.Connecting(currentName)
         emitInfo("Connecting to $currentName (${device.address})…")
-        // autoConnect=false for a fast, direct connection; explicit LE transport.
         gatt = device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
-    /** Reconnect to the most recently used device, if any. */
     fun reconnect() {
         val device = lastDevice
         if (device == null) {
@@ -205,7 +213,7 @@ class BleManager(context: Context) {
         val g = gatt
         if (g != null && hasConnectPermission()) {
             emitInfo("Disconnecting…")
-            g.disconnect() // onConnectionStateChange(DISCONNECTED) closes the gatt
+            g.disconnect()
         } else {
             closeGatt()
             _state.value = ConnectionState.Disconnected
@@ -225,12 +233,10 @@ class BleManager(context: Context) {
             when (newState) {
                 BluetoothGatt.STATE_CONNECTED -> {
                     emitInfo("Connected. Requesting high priority + discovering services…")
-                    // Ask for a low-latency connection interval for snappy CLI I/O.
                     g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
                     _state.value = ConnectionState.DiscoveringServices(currentName)
                     g.discoverServices()
                 }
-
                 BluetoothGatt.STATE_DISCONNECTED -> {
                     val wasIntentional = userInitiatedDisconnect
                     closeGatt()
@@ -263,80 +269,48 @@ class BleManager(context: Context) {
                 fail("Required characteristics missing on device.")
                 return
             }
-
             _state.value = ConnectionState.NegotiatingMtu(currentName)
             emitInfo("Services found. Negotiating MTU…")
-            // Firmware does NOT start MTU negotiation — the app must.
             g.requestMtu(BleConstants.TARGET_MTU)
         }
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
             negotiatedMtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23
-            val payload = negotiatedMtu - 3
-            emitInfo("MTU = $negotiatedMtu (max $payload bytes/notification).")
+            emitInfo("MTU = $negotiatedMtu (max ${negotiatedMtu - 3} bytes/notification).")
             _state.value = ConnectionState.EnablingNotifications(currentName)
             enableResponseNotifications(g)
         }
 
-        override fun onDescriptorWrite(
-            g: BluetoothGatt,
-            descriptor: BluetoothGattDescriptor,
-            status: Int,
-        ) {
+        override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (descriptor.uuid != BleConstants.CCCD) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 fail("Failed to enable notifications (status $status).")
                 return
             }
-            _state.value = ConnectionState.Ready(currentName, negotiatedMtu)
-            emitInfo("Ready. Log in with:  login <username> <password>")
-            // Pull device-information (firmware version etc.) as the first queued reads.
-            requestDeviceInfo()
+            // Subscribed. Either run the secure handshake, or go straight to Ready (plaintext).
+            if (psk != null) startSecureHandshake() else becomeReady(secure = false)
         }
 
-        override fun onCharacteristicWrite(
-            g: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int,
-        ) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                emitError("Write failed (status $status).")
-            }
+        override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) emitError("Write failed (status $status).")
             onOpComplete()
         }
 
-        // Notifications: Android 13+ delivers the value directly; older devices use the
-        // deprecated overload with characteristic.value. We handle both.
-        override fun onCharacteristicChanged(
-            g: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray,
-        ) = handleNotification(characteristic, value)
+        // Android 13+ delivers the value; older devices use the deprecated overload.
+        override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) =
+            handleNotification(characteristic, value)
 
-        // Pre-API-33 delivery path.
         @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-        override fun onCharacteristicChanged(
-            g: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-        ) = handleNotification(characteristic, characteristic.value ?: ByteArray(0))
+        override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) =
+            handleNotification(characteristic, characteristic.value ?: ByteArray(0))
 
-        override fun onCharacteristicRead(
-            g: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray,
-            status: Int,
-        ) {
+        override fun onCharacteristicRead(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
             handleRead(characteristic, value, status)
             onOpComplete()
         }
 
-        // Pre-API-33 delivery path.
         @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-        override fun onCharacteristicRead(
-            g: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int,
-        ) {
+        override fun onCharacteristicRead(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             handleRead(characteristic, characteristic.value ?: ByteArray(0), status)
             onOpComplete()
         }
@@ -344,25 +318,120 @@ class BleManager(context: Context) {
 
     private fun enableResponseNotifications(g: BluetoothGatt) {
         val char = responseChar ?: return fail("Response characteristic missing.")
-        // Step 1: tell Android to route notifications for this characteristic to us.
         if (!g.setCharacteristicNotification(char, true)) {
             fail("setCharacteristicNotification returned false.")
             return
         }
-        // Step 2: write 0x0001 to the CCCD. Skip this and the device sends nothing.
-        val cccd = char.getDescriptor(BleConstants.CCCD)
-        if (cccd == null) {
-            fail("Response CCCD (0x2902) not found.")
-            return
-        }
+        val cccd = char.getDescriptor(BleConstants.CCCD) ?: return fail("Response CCCD (0x2902) not found.")
         writeDescriptorCompat(g, cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
     }
 
+    private fun becomeReady(secure: Boolean) {
+        _state.value = ConnectionState.Ready(currentName, negotiatedMtu)
+        if (secure) emitInfo("Secure channel established. Log in with:  login <username> <password>")
+        else emitInfo("Ready. Log in with:  login <username> <password>")
+        requestDeviceInfo()
+    }
+
+    // --- Secure handshake -----------------------------------------------------------
+
+    private fun startSecureHandshake() {
+        val key = psk ?: return becomeReady(secure = false)
+        val ch = SecureChannel(key)
+        channel = ch
+        secureEstablished = false
+        synchronized(rxLock) { rxBuffer.clear() }
+        _state.value = ConnectionState.Securing(currentName)
+        emitInfo("Securing channel…")
+        scheduleHandshakeTimeout()
+        enqueue(GattOp.WriteRequest(ch.hello()))
+    }
+
+    private fun handleHandshakeMessage(ch: SecureChannel, msg: ByteArray) {
+        if (msg.isEmpty()) return
+        when (msg[0]) {
+            SecureChannel.T_HELLO_ACK -> {
+                val confirm = ch.onHelloAck(msg)
+                if (confirm != null) enqueue(GattOp.WriteRequest(confirm))
+                else failSecure("Secure handshake failed (bad HELLO_ACK).")
+            }
+            SecureChannel.T_CONFIRM_ACK -> {
+                if (ch.onConfirmAck(msg)) {
+                    cancelHandshakeTimeout()
+                    secureEstablished = true
+                    becomeReady(secure = true)
+                } else {
+                    failSecure("Secure handshake failed — wrong passphrase?")
+                }
+            }
+            // Anything else (e.g. a plaintext line from a device not in secure mode) → fail.
+            else -> failSecure("Device did not complete the secure handshake — check the passphrase / device secret.")
+        }
+    }
+
+    private fun failSecure(reason: String) {
+        cancelHandshakeTimeout()
+        channel = null
+        secureEstablished = false
+        fail(reason)
+    }
+
+    private val handshakeTimeout = Runnable {
+        if (channel != null && !secureEstablished) {
+            failSecure("Secure handshake timed out — check the passphrase / device secret.")
+        }
+    }
+
+    private fun scheduleHandshakeTimeout() = handler.postDelayed(handshakeTimeout, HANDSHAKE_TIMEOUT_MS)
+    private fun cancelHandshakeTimeout() = handler.removeCallbacks(handshakeTimeout)
+
+    // --- Inbound (notifications) ----------------------------------------------------
+
     private fun handleNotification(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
         if (characteristic.uuid != BleConstants.RESPONSE_CHAR) return
-        val text = value.toString(Charsets.UTF_8)
-        updateAuthFromReply(text)
-        _incoming.tryEmit(text)
+        val ch = channel
+        if (ch == null) {
+            // Plaintext mode: one notification == one reply (may contain '\n').
+            val text = value.toString(Charsets.UTF_8)
+            updateAuthFromReply(text)
+            _incoming.tryEmit(text)
+            return
+        }
+        if (ch.state != SecureChannel.State.ESTABLISHED) {
+            handleHandshakeMessage(ch, value)
+            return
+        }
+        // Established: decrypt a DATA frame and stream it. Foreign/replayed frames → null.
+        ch.decrypt(value)?.let { appendSecureRx(String(it, Charsets.UTF_8)) }
+    }
+
+    /** Reassemble the device's chunked, unframed reply stream into console lines. */
+    private fun appendSecureRx(text: String) {
+        synchronized(rxLock) { rxBuffer.append(text) }
+        while (true) {
+            val line = synchronized(rxLock) {
+                val idx = rxBuffer.indexOf("\n")
+                if (idx < 0) return@synchronized null
+                rxBuffer.substring(0, idx).also { rxBuffer.delete(0, idx + 1) }
+            } ?: break
+            emitSecureLine(line)
+        }
+        // Flush a trailing partial line shortly after the stream goes quiet.
+        handler.removeCallbacks(idleFlush)
+        handler.postDelayed(idleFlush, IDLE_FLUSH_MS)
+    }
+
+    private val idleFlush = Runnable {
+        val s = synchronized(rxLock) {
+            if (rxBuffer.isEmpty()) null else rxBuffer.toString().also { rxBuffer.clear() }
+        }
+        if (s != null) emitSecureLine(s)
+    }
+
+    private fun emitSecureLine(line: String) {
+        val l = line.trimEnd('\r')
+        updateAuthFromReply(l)
+        _incoming.tryEmit(l)
     }
 
     private fun updateAuthFromReply(text: String) {
@@ -373,11 +442,7 @@ class BleManager(context: Context) {
         }
     }
 
-    private fun handleRead(
-        characteristic: BluetoothGattCharacteristic,
-        value: ByteArray,
-        status: Int,
-    ) {
+    private fun handleRead(characteristic: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
         if (status != BluetoothGatt.GATT_SUCCESS) return
         val text = value.toString(Charsets.UTF_8).trim()
         if (text.isEmpty()) return
@@ -400,19 +465,9 @@ class BleManager(context: Context) {
     private val opQueue = ArrayDeque<GattOp>()
     private var opInFlight = false
 
-    private fun enqueue(op: GattOp) {
-        synchronized(opLock) {
-            opQueue.addLast(op)
-            runNextLocked()
-        }
-    }
+    private fun enqueue(op: GattOp) = synchronized(opLock) { opQueue.addLast(op); runNextLocked() }
 
-    private fun onOpComplete() {
-        synchronized(opLock) {
-            opInFlight = false
-            runNextLocked()
-        }
-    }
+    private fun onOpComplete() = synchronized(opLock) { opInFlight = false; runNextLocked() }
 
     private fun runNextLocked() {
         if (opInFlight) return
@@ -420,22 +475,17 @@ class BleManager(context: Context) {
         val op = opQueue.removeFirstOrNull() ?: return
         opInFlight = true
         val ok = when (op) {
-            is GattOp.WriteRequest -> {
-                val char = requestChar
-                if (char == null) false
-                else writeCharacteristicCompat(g, char, op.bytes)
-            }
+            is GattOp.WriteRequest -> requestChar?.let { writeCharacteristicCompat(g, it, op.bytes) } ?: false
             is GattOp.ReadChar -> g.readCharacteristic(op.characteristic)
         }
         if (!ok) {
-            // The framework rejected the request synchronously — don't wait for a callback.
             opInFlight = false
             emitError("BLE operation could not be started.")
             runNextLocked()
         }
     }
 
-    /** Send a free-text CLI command (e.g. "help", or "login <user> <pass>"). */
+    /** Send a free-text CLI command (encrypted as a DATA frame when the channel is up). */
     fun sendCommand(command: String) {
         if (_state.value !is ConnectionState.Ready) {
             emitError("Not connected.")
@@ -446,14 +496,24 @@ class BleManager(context: Context) {
             return
         }
         val bytes = command.toByteArray(Charsets.UTF_8)
-        if (bytes.size > BleConstants.MAX_COMMAND_BYTES) {
-            emitError("Command too long (${bytes.size} > ${BleConstants.MAX_COMMAND_BYTES} bytes).")
-            return
+        val ch = channel
+        if (ch != null && secureEstablished) {
+            val maxPlain = (negotiatedMtu - 28).coerceAtLeast(20)
+            if (bytes.size > maxPlain) {
+                emitError("Command too long for one secure frame (${bytes.size} > $maxPlain bytes).")
+                return
+            }
+            enqueue(GattOp.WriteRequest(ch.encrypt(bytes)))
+        } else {
+            if (bytes.size > BleConstants.MAX_COMMAND_BYTES) {
+                emitError("Command too long (${bytes.size} > ${BleConstants.MAX_COMMAND_BYTES} bytes).")
+                return
+            }
+            enqueue(GattOp.WriteRequest(bytes))
         }
-        enqueue(GattOp.WriteRequest(bytes))
     }
 
-    /** Read the STATUS characteristic (JSON snapshot). */
+    /** Read the STATUS characteristic (JSON snapshot — plaintext, outside the channel). */
     fun readStatus() {
         val char = statusChar
         if (char == null || _state.value !is ConnectionState.Ready) {
@@ -466,50 +526,29 @@ class BleManager(context: Context) {
     private fun requestDeviceInfo() {
         val g = gatt ?: return
         val info = g.getService(BleConstants.DEVICE_INFO_SERVICE) ?: return
-        listOf(
-            BleConstants.FIRMWARE_CHAR,
-            BleConstants.MODEL_CHAR,
-            BleConstants.MANUFACTURER_CHAR,
-        ).forEach { uuid ->
+        listOf(BleConstants.FIRMWARE_CHAR, BleConstants.MODEL_CHAR, BleConstants.MANUFACTURER_CHAR).forEach { uuid ->
             info.getCharacteristic(uuid)?.let { enqueue(GattOp.ReadChar(it)) }
         }
     }
 
     // --- API-level compatibility shims ----------------------------------------------
 
-    private fun writeCharacteristicCompat(
-        g: BluetoothGatt,
-        char: BluetoothGattCharacteristic,
-        value: ByteArray,
-    ): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            g.writeCharacteristic(
-                char,
-                value,
-                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
-            ) == BluetoothGatt.GATT_SUCCESS
+    private fun writeCharacteristicCompat(g: BluetoothGatt, char: BluetoothGattCharacteristic, value: ByteArray): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            g.writeCharacteristic(char, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS
         } else {
-            @Suppress("DEPRECATION")
-            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            @Suppress("DEPRECATION")
-            char.value = value
-            @Suppress("DEPRECATION")
-            g.writeCharacteristic(char)
+            @Suppress("DEPRECATION") run {
+                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                char.value = value
+                g.writeCharacteristic(char)
+            }
         }
-    }
 
-    private fun writeDescriptorCompat(
-        g: BluetoothGatt,
-        descriptor: BluetoothGattDescriptor,
-        value: ByteArray,
-    ) {
+    private fun writeDescriptorCompat(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, value: ByteArray) {
         val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             g.writeDescriptor(descriptor, value) == BluetoothGatt.GATT_SUCCESS
         } else {
-            @Suppress("DEPRECATION")
-            descriptor.value = value
-            @Suppress("DEPRECATION")
-            g.writeDescriptor(descriptor)
+            @Suppress("DEPRECATION") run { descriptor.value = value; g.writeDescriptor(descriptor) }
         }
         if (!ok) fail("Failed to write CCCD descriptor.")
     }
@@ -517,10 +556,12 @@ class BleManager(context: Context) {
     // --- Helpers --------------------------------------------------------------------
 
     private fun closeGatt() {
-        synchronized(opLock) {
-            opQueue.clear()
-            opInFlight = false
-        }
+        cancelHandshakeTimeout()
+        handler.removeCallbacks(idleFlush)
+        channel = null
+        secureEstablished = false
+        synchronized(rxLock) { rxBuffer.clear() }
+        synchronized(opLock) { opQueue.clear(); opInFlight = false }
         if (hasConnectPermission()) gatt?.close()
         gatt = null
         requestChar = null
@@ -531,44 +572,31 @@ class BleManager(context: Context) {
     private fun fail(reason: String) {
         emitError(reason)
         _state.value = ConnectionState.Failed(reason)
-        userInitiatedDisconnect = true // suppress the "device disconnected" follow-up
+        userInitiatedDisconnect = true
         if (hasConnectPermission()) gatt?.disconnect()
     }
 
-    private fun emitInfo(text: String) {
-        _messages.tryEmit(BleMessage(text, BleMessage.Kind.INFO))
-    }
-
-    private fun emitError(text: String) {
-        _messages.tryEmit(BleMessage(text, BleMessage.Kind.ERROR))
-    }
+    private fun emitInfo(text: String) = _messages.tryEmit(BleMessage(text, BleMessage.Kind.INFO)).let {}
+    private fun emitError(text: String) = _messages.tryEmit(BleMessage(text, BleMessage.Kind.ERROR)).let {}
 
     private fun hasPermission(permission: String): Boolean =
-        ContextCompat.checkSelfPermission(appContext, permission) ==
-            PackageManager.PERMISSION_GRANTED
+        ContextCompat.checkSelfPermission(appContext, permission) == PackageManager.PERMISSION_GRANTED
 
     fun hasScanPermission(): Boolean =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            hasPermission(Manifest.permission.BLUETOOTH_SCAN)
-        } else {
-            hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) hasPermission(Manifest.permission.BLUETOOTH_SCAN)
+        else hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
 
     fun hasConnectPermission(): Boolean =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
-        } else {
-            true // legacy BLUETOOTH permission is install-time on API <= 30
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        else true
 
     companion object {
-        /** The runtime permissions to request for the current API level. */
+        private const val HANDSHAKE_TIMEOUT_MS = 6_000L
+        private const val IDLE_FLUSH_MS = 250L
+
         fun requiredPermissions(): Array<String> =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                arrayOf(
-                    Manifest.permission.BLUETOOTH_SCAN,
-                    Manifest.permission.BLUETOOTH_CONNECT,
-                )
+                arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
             } else {
                 arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
             }

@@ -16,9 +16,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Switch
@@ -26,12 +31,19 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.hardwareone.console.BuildConfig
@@ -50,6 +62,13 @@ fun SettingsScreen(
     autoLogin: Boolean,
     onAutoLoginChange: (Boolean) -> Unit,
     onForget: () -> Unit,
+    logsAvailable: Boolean,
+    autoSaveLogs: Boolean,
+    onAutoSaveLogsChange: (Boolean) -> Unit,
+    onOpenSavedLogs: () -> Unit,
+    secureChannelConfigured: Boolean,
+    onSetChannelPassphrase: (String) -> Unit,
+    onClearChannelPassphrase: () -> Unit,
     onBack: () -> Unit,
 ) {
     val hw = LocalHwColors.current
@@ -126,6 +145,23 @@ fun SettingsScreen(
                     autoLogin = autoLogin,
                     onAutoLoginChange = onAutoLoginChange,
                     onForget = onForget,
+                )
+
+                Spacer(Modifier.height(12.dp))
+
+                LogsCard(
+                    logsAvailable = logsAvailable,
+                    autoSaveLogs = autoSaveLogs,
+                    onAutoSaveLogsChange = onAutoSaveLogsChange,
+                    onOpenSavedLogs = onOpenSavedLogs,
+                )
+
+                Spacer(Modifier.height(12.dp))
+
+                SecureChannelCard(
+                    configured = secureChannelConfigured,
+                    onSet = onSetChannelPassphrase,
+                    onClear = onClearChannelPassphrase,
                 )
 
                 Spacer(Modifier.weight(1f))
@@ -222,6 +258,161 @@ private fun SecurityCard(
             color = hw.muted,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(top = 8.dp),
+        )
+    }
+}
+
+@Composable
+private fun SecureChannelCard(
+    configured: Boolean,
+    onSet: (String) -> Unit,
+    onClear: () -> Unit,
+) {
+    val hw = LocalHwColors.current
+    var pass by remember { mutableStateOf("") }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(CardShape)
+            .background(hw.cardBg)
+            .border(1.dp, hw.cardBorder, CardShape)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = if (configured) "Secure channel · ON" else "Secure channel",
+            color = hw.muted,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(vertical = 6.dp),
+        )
+        Text(
+            text = "Encrypts commands and replies app-side (X25519 + ChaCha20-Poly1305). The " +
+                "passphrase must match the device's \"blesecret\". Applies on the next connect.",
+            color = hw.onGradient,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = pass,
+            onValueChange = { pass = it },
+            singleLine = true,
+            shape = CardShape,
+            placeholder = { Text("passphrase (min 8 chars)") },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Password,
+                autoCorrectEnabled = false,
+                imeAction = ImeAction.Done,
+            ),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = hw.onGradient,
+                unfocusedTextColor = hw.onGradient,
+                focusedContainerColor = hw.cardBg,
+                unfocusedContainerColor = hw.cardBg,
+                cursorColor = hw.accent,
+                focusedBorderColor = hw.accent,
+                unfocusedBorderColor = hw.cardBorder,
+                focusedPlaceholderColor = hw.muted,
+                unfocusedPlaceholderColor = hw.muted,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Button(
+                onClick = { onSet(pass); pass = "" },
+                enabled = pass.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = hw.onGradient,
+                    contentColor = hw.accent,
+                    disabledContainerColor = hw.cardBg,
+                    disabledContentColor = hw.muted,
+                ),
+            ) { Text(if (configured) "UPDATE" else "SAVE") }
+            if (configured) {
+                TextButton(onClick = onClear) { Text("Disable", color = hw.danger) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LogsCard(
+    logsAvailable: Boolean,
+    autoSaveLogs: Boolean,
+    onAutoSaveLogsChange: (Boolean) -> Unit,
+    onOpenSavedLogs: () -> Unit,
+) {
+    val hw = LocalHwColors.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(CardShape)
+            .background(hw.cardBg)
+            .border(1.dp, hw.cardBorder, CardShape)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = "Logs",
+            color = hw.muted,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(vertical = 6.dp),
+        )
+        if (!logsAvailable) {
+            Text(
+                text = "Set up a screen lock or biometric to enable encrypted log storage.",
+                color = hw.onGradient,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Auto-save log on exit",
+                        color = hw.onGradient,
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Text(
+                        text = "Encrypted; open it later from Saved logs",
+                        color = hw.muted,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                Switch(
+                    checked = autoSaveLogs,
+                    onCheckedChange = onAutoSaveLogsChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = hw.onGradient,
+                        checkedTrackColor = hw.accent,
+                        uncheckedThumbColor = hw.muted,
+                        uncheckedTrackColor = hw.cardBorder,
+                    ),
+                )
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenSavedLogs)
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Saved logs",
+                    color = hw.onGradient,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(text = "›", color = hw.muted, style = MaterialTheme.typography.titleLarge)
+            }
+        }
+        Text(
+            text = "Saved in the app's private storage, encrypted with a Keystore key; " +
+                "opening one requires a biometric/PIN prompt.",
+            color = hw.muted,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(top = 4.dp),
         )
     }
 }

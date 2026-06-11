@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -19,9 +20,9 @@ import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSiz
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
@@ -30,21 +31,27 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.hardwareone.console.ble.BleManager
 import com.hardwareone.console.ble.ConnectionState
+import com.hardwareone.console.security.SavedLog
 import com.hardwareone.console.ui.ConsoleScreen
 import com.hardwareone.console.ui.ConsoleViewModel
+import com.hardwareone.console.ui.LogViewerScreen
+import com.hardwareone.console.ui.SavedLogsScreen
 import com.hardwareone.console.ui.SettingsScreen
 import com.hardwareone.console.ui.ThemePreference
 import com.hardwareone.console.ui.ThemeStore
 import com.hardwareone.console.ui.rememberFoldPosture
 import com.hardwareone.console.ui.theme.HardwareOneTheme
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import javax.crypto.Cipher
 
 /**
  * Single Activity (a [FragmentActivity] so it can host [BiometricPrompt]). It owns the
- * system interactions that must happen on the Activity — runtime permissions, the
- * "turn Bluetooth on" prompt, and the biometric/PIN prompt for the credential store —
- * and hands everything else to [ConsoleViewModel] / [ConsoleScreen].
+ * system interactions — runtime permissions, the "turn Bluetooth on" prompt, biometric/PIN
+ * prompts, and the file picker for exporting logs — plus simple screen navigation, and
+ * hands everything else to [ConsoleViewModel] and the screen composables.
  */
 class MainActivity : FragmentActivity() {
 
@@ -52,6 +59,21 @@ class MainActivity : FragmentActivity() {
 
     /** One auto-login attempt per connection. */
     private var autoLoginHandled = false
+
+    /** Tiny navigation back-stack (snapshot list so Compose observes it). */
+    private sealed interface Screen {
+        data object Console : Screen
+        data object Settings : Screen
+        data object SavedLogs : Screen
+        data class Viewer(val fileName: String, val title: String, val text: String) : Screen
+    }
+
+    private val nav = mutableStateListOf<Screen>(Screen.Console)
+    private fun navTo(screen: Screen) { nav.add(screen) }
+    private fun navBack() { if (nav.size > 1) nav.removeAt(nav.lastIndex) }
+    private fun navToConsole() { nav.clear(); nav.add(Screen.Console) }
+
+    private var pendingExportText: String = ""
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -64,16 +86,32 @@ class MainActivity : FragmentActivity() {
 
     private val enableBluetoothLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            // Whether the user enabled BT or not, just try to scan; the manager reports
-            // a clear error if BT is still off.
             vm.startScan()
+        }
+
+    private val createDocumentLauncher =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+            if (uri != null) {
+                runCatching {
+                    contentResolver.openOutputStream(uri)?.use {
+                        it.write(pendingExportText.toByteArray(Charsets.UTF_8))
+                    }
+                }
+                    .onSuccess { vm.reportInfo("Log exported.") }
+                    .onFailure { vm.reportError("Export failed: ${it.message}") }
+            }
+            pendingExportText = ""
         }
 
     @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Transparent bars with light (white) icons — readable over the coloured/dark
-        // gradient in both light and dark themes.
+        // Always block screenshots, screen recording, screen-share, and the recents preview.
+        // Not user-configurable by design.
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE,
+        )
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
@@ -86,37 +124,68 @@ class MainActivity : FragmentActivity() {
                 ThemePreference.DARK -> true
             }
             HardwareOneTheme(darkTheme = darkTheme) {
-                var showSettings by rememberSaveable { mutableStateOf(false) }
+                BackHandler(enabled = nav.size > 1) { navBack() }
+
                 val widthSizeClass = calculateWindowSizeClass(this).widthSizeClass
                 val foldPosture = rememberFoldPosture(this)
-                if (showSettings) {
-                    BackHandler { showSettings = false }
-                    val autoLogin by vm.autoLogin.collectAsState()
-                    val hasSaved by vm.hasSavedCredentials.collectAsState()
-                    val savedUser by vm.savedUsername.collectAsState()
-                    SettingsScreen(
-                        themePref = themePref,
-                        onThemeChange = { themePref = it; ThemeStore.save(this, it) },
-                        securityAvailable = vm.canUseCredentialStore,
-                        hasSavedCredentials = hasSaved,
-                        savedUsername = savedUser,
-                        autoLogin = autoLogin,
-                        onAutoLoginChange = vm::setAutoLogin,
-                        onForget = vm::forgetCredentials,
-                        onBack = { showSettings = false },
-                    )
-                } else {
-                    ConsoleScreen(
+
+                when (val screen = nav.last()) {
+                    Screen.Console -> ConsoleScreen(
                         vm = vm,
                         onScanClicked = ::onScanClicked,
                         widthSizeClass = widthSizeClass,
                         foldPosture = foldPosture,
-                        onOpenSettings = { showSettings = true },
+                        onOpenSettings = { navTo(Screen.Settings) },
                         onLogin = { user, pass, remember ->
                             vm.login(user, pass)
                             if (remember) authAndSaveCredentials(user, pass)
                         },
                         onLoginButton = ::onLoginButtonClicked,
+                    )
+
+                    Screen.Settings -> {
+                        val autoLogin by vm.autoLogin.collectAsState()
+                        val hasSaved by vm.hasSavedCredentials.collectAsState()
+                        val savedUser by vm.savedUsername.collectAsState()
+                        val autoSaveLogs by vm.autoSaveLogs.collectAsState()
+                        val secureConfigured by vm.secureChannelConfigured.collectAsState()
+                        SettingsScreen(
+                            themePref = themePref,
+                            onThemeChange = { themePref = it; ThemeStore.save(this, it) },
+                            securityAvailable = vm.canUseCredentialStore,
+                            hasSavedCredentials = hasSaved,
+                            savedUsername = savedUser,
+                            autoLogin = autoLogin,
+                            onAutoLoginChange = vm::setAutoLogin,
+                            onForget = vm::forgetCredentials,
+                            logsAvailable = vm.canSaveLogs,
+                            autoSaveLogs = autoSaveLogs,
+                            onAutoSaveLogsChange = vm::setAutoSaveLogs,
+                            onOpenSavedLogs = { vm.refreshSavedLogs(); navTo(Screen.SavedLogs) },
+                            secureChannelConfigured = secureConfigured,
+                            onSetChannelPassphrase = vm::setChannelPassphrase,
+                            onClearChannelPassphrase = vm::clearChannelPassphrase,
+                            onBack = { navBack() },
+                        )
+                    }
+
+                    Screen.SavedLogs -> {
+                        val savedLogs by vm.savedLogs.collectAsState()
+                        SavedLogsScreen(
+                            logs = savedLogs,
+                            onOpen = ::openSavedLog,
+                            onDelete = { vm.deleteSavedLog(it.fileName) },
+                            onBack = { navBack() },
+                        )
+                    }
+
+                    is Screen.Viewer -> LogViewerScreen(
+                        title = screen.title,
+                        text = screen.text,
+                        onExport = { exportLog(screen.text) },
+                        onLoadToConsole = { vm.loadLogIntoConsole(screen.text); navToConsole() },
+                        onDelete = { vm.deleteSavedLog(screen.fileName); navBack() },
+                        onBack = { navBack() },
                     )
                 }
             }
@@ -137,6 +206,11 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    override fun onStop() {
+        super.onStop()
+        vm.autoSaveLogIfEnabled()
+    }
+
     // --- Credential store: biometric/PIN-gated save & auto-login -----------------------
 
     private fun authAndSaveCredentials(username: String, password: String) {
@@ -145,12 +219,14 @@ class MainActivity : FragmentActivity() {
             vm.reportError("Secure storage unavailable on this device.")
             return
         }
-        showCryptoPrompt("Save credentials", "Authenticate to encrypt your login", cipher) { authed ->
-            vm.commitCredentials(authed, username, password)
-        }
+        showCryptoPrompt(
+            title = "Save credentials",
+            subtitle = "Authenticate to encrypt your login",
+            cipher = cipher,
+            authenticators = vm.allowedAuthenticators(),
+        ) { authed -> vm.commitCredentials(authed, username, password) }
     }
 
-    /** Automatic, once-per-connection biometric login when the user opted in. */
     private fun maybeAutoLogin() {
         if (autoLoginHandled) return
         if (!vm.autoLogin.value || !vm.hasSavedCredentials.value || vm.authenticated.value) return
@@ -158,16 +234,11 @@ class MainActivity : FragmentActivity() {
         startBiometricLogin()
     }
 
-    /** LOGIN button: re-offer the biometric prompt if creds are saved, else the form. */
     private fun onLoginButtonClicked() {
-        if (vm.canUseCredentialStore && vm.hasSavedCredentials.value) {
-            startBiometricLogin()
-        } else {
-            vm.showLoginDialog()
-        }
+        if (vm.canUseCredentialStore && vm.hasSavedCredentials.value) startBiometricLogin()
+        else vm.showLoginDialog()
     }
 
-    /** Prompt biometric/PIN, decrypt the saved password, and log in. Cancel → manual form. */
     private fun startBiometricLogin() {
         val cipher = vm.decryptCipherOrNull()
         val username = vm.savedUsername.value
@@ -180,7 +251,7 @@ class MainActivity : FragmentActivity() {
             title = "Log in to HardwareOne",
             subtitle = "Authenticate to use your saved login",
             cipher = cipher,
-            // Backed out of the prompt? Fall back to the manual login form.
+            authenticators = vm.allowedAuthenticators(),
             onCancel = { vm.showLoginDialog() },
         ) { authed ->
             val password = vm.readStoredPassword(authed)
@@ -189,10 +260,44 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    // --- Saved logs: biometric-gated open + plaintext export ----------------------------
+
+    private fun openSavedLog(log: SavedLog) {
+        val cipher = vm.logDecryptCipherOrNull()
+        if (cipher == null) {
+            vm.reportError("No saved log to open.")
+            return
+        }
+        showCryptoPrompt(
+            title = "Open saved log",
+            subtitle = "Authenticate to decrypt this log",
+            cipher = cipher,
+            authenticators = vm.logAllowedAuthenticators(),
+        ) { authed ->
+            val text = vm.finishLogDecrypt(log.fileName, authed)
+            if (text != null) navTo(Screen.Viewer(log.fileName, savedLogTitle(log), text))
+            else vm.reportError("Could not decrypt log.")
+        }
+    }
+
+    private fun exportLog(text: String) {
+        pendingExportText = text
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        createDocumentLauncher.launch("hardwareone-log-$stamp.txt")
+    }
+
+    private fun savedLogTitle(log: SavedLog): String {
+        val base = SimpleDateFormat("MMM d, yyyy  HH:mm", Locale.getDefault()).format(Date(log.lastModified))
+        return if (log.isAuto) "$base (auto)" else base
+    }
+
+    // --- Shared biometric prompt -------------------------------------------------------
+
     private fun showCryptoPrompt(
         title: String,
         subtitle: String,
         cipher: Cipher,
+        authenticators: Int,
         onCancel: () -> Unit = {},
         onSuccess: (Cipher) -> Unit,
     ) {
@@ -205,7 +310,6 @@ class MainActivity : FragmentActivity() {
             }
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                // Surface real errors; either way fall back to whatever onCancel wants.
                 if (errorCode != BiometricPrompt.ERROR_USER_CANCELED &&
                     errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
                     errorCode != BiometricPrompt.ERROR_CANCELED
@@ -219,9 +323,8 @@ class MainActivity : FragmentActivity() {
         val info = BiometricPrompt.PromptInfo.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
-            .setAllowedAuthenticators(vm.allowedAuthenticators())
+            .setAllowedAuthenticators(authenticators)
             .apply {
-                // A negative button is required only when device credential is NOT an option.
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) setNegativeButtonText("Cancel")
             }
             .build()
@@ -230,22 +333,18 @@ class MainActivity : FragmentActivity() {
 
     // --- Scanning entry point ----------------------------------------------------------
 
-    /** Permission-aware scan entry point passed down to the UI. */
     private fun onScanClicked() {
         val missing = BleManager.requiredPermissions().filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isNotEmpty()) {
-            permissionLauncher.launch(missing.toTypedArray())
-        } else {
-            ensureBluetoothThenScan()
-        }
+        if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
+        else ensureBluetoothThenScan()
     }
 
     private fun ensureBluetoothThenScan() {
         val adapter = (ContextCompat.getSystemService(this, BluetoothManager::class.java))?.adapter
         if (adapter == null) {
-            vm.startScan() // manager reports "Bluetooth not available"
+            vm.startScan()
             return
         }
         if (!adapter.isEnabled) {

@@ -15,6 +15,9 @@ sealed interface ConnectionState {
     data class NegotiatingMtu(val deviceName: String) : ConnectionState
     data class EnablingNotifications(val deviceName: String) : ConnectionState
 
+    /** Running the app-layer secure-channel handshake (X25519/ChaCha20-Poly1305). */
+    data class Securing(val deviceName: String) : ConnectionState
+
     /** Link up, notifications enabled. Ready to send commands (log in first). */
     data class Ready(val deviceName: String, val mtu: Int) : ConnectionState
 

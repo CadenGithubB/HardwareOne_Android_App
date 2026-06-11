@@ -12,8 +12,8 @@ android {
         applicationId = "com.hardwareone.console"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.3.0"
     }
 
     buildTypes {
@@ -59,6 +59,15 @@ dependencies {
 
     // Biometric / device-credential prompt for the Keystore-backed credential store.
     implementation(libs.androidx.biometric)
+    // Force a current androidx.fragment (biometric 1.1.0 drags in 1.2.5, whose
+    // FragmentActivity rejects the Activity Result API's >16-bit request codes → crash).
+    implementation(libs.androidx.fragment)
+
+    // FOSS crypto (X25519, HKDF, ChaCha20-Poly1305, PBKDF2) for the app-layer secure
+    // channel — works on all API levels and matches the firmware's libsodium/mbedTLS bytes.
+    implementation(libs.bouncycastle)
+
+    testImplementation(libs.junit)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation(libs.androidx.compose.ui.tooling.preview)
