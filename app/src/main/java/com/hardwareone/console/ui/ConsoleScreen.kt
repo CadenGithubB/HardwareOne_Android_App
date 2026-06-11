@@ -121,6 +121,7 @@ fun ConsoleScreen(
             onDisconnect = vm::disconnect,
             onReconnect = vm::reconnect,
             onReadStatus = vm::readStatus,
+            onSyncClock = vm::syncClock,
             onClear = vm::clearLog,
             onSaveLog = saveLog,
             onOpenSettings = onOpenSettings,
@@ -219,6 +220,7 @@ private fun Header(
     onDisconnect: () -> Unit,
     onReconnect: () -> Unit,
     onReadStatus: () -> Unit,
+    onSyncClock: () -> Unit,
     onClear: () -> Unit,
     onSaveLog: (() -> Unit)?,
     onOpenSettings: () -> Unit,
@@ -226,7 +228,7 @@ private fun Header(
     val controls: @Composable () -> Unit = {
         PrimaryConnectionButton(state, onScan, onStopScan, onDisconnect)
         ConsoleMenu(onSaveLog, onClear)
-        DeviceMenu(state, authenticated, deviceInfo, onReadStatus, onReconnect)
+        DeviceMenu(state, authenticated, deviceInfo, onReadStatus, onSyncClock, onReconnect)
     }
     if (compact) {
         Column(
@@ -312,6 +314,7 @@ private fun DeviceMenu(
     authenticated: Boolean,
     deviceInfo: DeviceInfo?,
     onReadStatus: () -> Unit,
+    onSyncClock: () -> Unit,
     onReconnect: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -331,6 +334,10 @@ private fun DeviceMenu(
                     DropdownMenuItem(
                         text = { Text("Read status") },
                         onClick = { expanded = false; onReadStatus() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Sync clock") },
+                        onClick = { expanded = false; onSyncClock() },
                     )
                 }
             } else {

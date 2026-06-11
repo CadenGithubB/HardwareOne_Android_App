@@ -91,6 +91,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     fun reconnect() = ble.reconnect()
     fun readStatus() = ble.readStatus()
 
+    /** Push the phone's current UTC time to the device: `timeset <epoch_seconds>`. */
+    fun syncClock() {
+        val epoch = System.currentTimeMillis() / 1000
+        append(LogEntry("> timeset $epoch  (sync clock)", LogEntry.Kind.OUTGOING))
+        ble.sendCommand("timeset $epoch")
+    }
+
     /** Send whatever the user typed. Login lines have their password masked in the log. */
     fun send(rawInput: String) {
         val command = rawInput.trim()
