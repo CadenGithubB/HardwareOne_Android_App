@@ -37,6 +37,7 @@ import com.hardwareone.console.ui.ConsoleScreen
 import com.hardwareone.console.ui.ConsoleViewModel
 import com.hardwareone.console.ui.LogViewerScreen
 import com.hardwareone.console.ui.SavedLogsScreen
+import com.hardwareone.console.ui.SensorsScreen
 import com.hardwareone.console.ui.SettingsScreen
 import com.hardwareone.console.ui.StatusScreen
 import com.hardwareone.console.ui.ThemePreference
@@ -67,6 +68,7 @@ class MainActivity : FragmentActivity() {
         data object Console : Screen
         data object Settings : Screen
         data object Status : Screen
+        data object Sensors : Screen
         data object SavedLogs : Screen
         data class Viewer(val fileName: String, val title: String, val text: String) : Screen
     }
@@ -140,6 +142,7 @@ class MainActivity : FragmentActivity() {
                         foldPosture = foldPosture,
                         onOpenSettings = { navTo(Screen.Settings) },
                         onOpenStatus = { navTo(Screen.Status) },
+                        onOpenSensors = { navTo(Screen.Sensors) },
                         onLogin = { user, pass, remember ->
                             vm.login(user, pass)
                             if (remember) authAndSaveCredentials(user, pass)
@@ -189,6 +192,9 @@ class MainActivity : FragmentActivity() {
                             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                                 while (true) {
                                     vm.refreshStatus()
+                                    // Also pull the real device list so the I²C "found" count
+                                    // matches it (the status-json scalar can over-count).
+                                    vm.loadI2cDevices(silent = true)
                                     kotlinx.coroutines.delay(3_000)
                                 }
                             }
@@ -205,12 +211,44 @@ class MainActivity : FragmentActivity() {
                         )
                     }
 
+                    Screen.Sensors -> {
+                        val sensors by vm.sensors.collectAsState()
+                        val sensorsLoading by vm.sensorsLoading.collectAsState()
+                        val sensorsError by vm.sensorsError.collectAsState()
+                        val controlModules by vm.controlModules.collectAsState()
+                        val controls by vm.controls.collectAsState()
+                        val controlsLoading by vm.controlsLoading.collectAsState()
+                        LaunchedEffect(Unit) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                vm.loadControlModules() // which sensors have adjustable settings
+                                while (true) {
+                                    vm.refreshSensors()
+                                    kotlinx.coroutines.delay(2_500)
+                                }
+                            }
+                        }
+                        SensorsScreen(
+                            sensors = sensors,
+                            loading = sensorsLoading,
+                            error = sensorsError,
+                            controlModules = controlModules,
+                            controls = controls,
+                            controlsLoading = controlsLoading,
+                            onToggle = vm::toggleSensor,
+                            onLoadControls = vm::loadControls,
+                            onSetControl = vm::setControl,
+                            onAction = vm::sensorAction,
+                            onRefresh = vm::refreshSensors,
+                            onBack = { vm.clearSensors(); navBack() },
+                        )
+                    }
+
                     Screen.SavedLogs -> {
                         val savedLogs by vm.savedLogs.collectAsState()
                         SavedLogsScreen(
                             logs = savedLogs,
+                            storageLocation = vm.logStorageLocation,
                             onOpen = ::openSavedLog,
-                            onDelete = { vm.deleteSavedLog(it.fileName) },
                             onBack = { navBack() },
                         )
                     }
@@ -219,7 +257,6 @@ class MainActivity : FragmentActivity() {
                         title = screen.title,
                         text = screen.text,
                         onExport = { exportLog(screen.text) },
-                        onLoadToConsole = { vm.loadLogIntoConsole(screen.text); navToConsole() },
                         onDelete = { vm.deleteSavedLog(screen.fileName); navBack() },
                         onBack = { navBack() },
                     )

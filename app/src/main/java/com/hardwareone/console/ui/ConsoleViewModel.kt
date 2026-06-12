@@ -54,6 +54,26 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private val _i2cLoading = MutableStateFlow(false)
     val i2cLoading: StateFlow<Boolean> = _i2cLoading.asStateFlow()
 
+    // --- Sensors page (`sensors json` viewing + `features <id> on/off` control) ---
+    private val _sensors = MutableStateFlow<List<com.hardwareone.console.ble.SensorEntry>?>(null)
+    val sensors: StateFlow<List<com.hardwareone.console.ble.SensorEntry>?> = _sensors.asStateFlow()
+
+    private val _sensorsError = MutableStateFlow<String?>(null)
+    val sensorsError: StateFlow<String?> = _sensorsError.asStateFlow()
+
+    private val _sensorsLoading = MutableStateFlow(false)
+    val sensorsLoading: StateFlow<Boolean> = _sensorsLoading.asStateFlow()
+
+    // Generic per-sensor settings controls (`controls json <module>`).
+    private val _controlModules = MutableStateFlow<Set<String>>(emptySet())
+    val controlModules: StateFlow<Set<String>> = _controlModules.asStateFlow()
+
+    private val _controls = MutableStateFlow<Map<String, com.hardwareone.console.ble.ControlsModule>>(emptyMap())
+    val controls: StateFlow<Map<String, com.hardwareone.console.ble.ControlsModule>> = _controls.asStateFlow()
+
+    private val _controlsLoading = MutableStateFlow<Set<String>>(emptySet())
+    val controlsLoading: StateFlow<Set<String>> = _controlsLoading.asStateFlow()
+
     // --- Credential storage state ---
     /** Device can present a biometric/PIN prompt (a credential is enrolled). */
     val canUseCredentialStore: Boolean get() = credentials.canAuthenticate()
@@ -97,9 +117,14 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         // Route captured (off-console) command replies to their pages.
         viewModelScope.launch {
             ble.captures.collect { capture ->
-                when (capture.tag) {
-                    TAG_STATUS -> onStatusCapture(capture.text, capture.timedOut)
-                    TAG_DEVICES -> onDevicesCapture(capture.text, capture.timedOut)
+                val tag = capture.tag
+                when {
+                    tag == TAG_STATUS -> onStatusCapture(capture.text, capture.timedOut)
+                    tag == TAG_DEVICES -> onDevicesCapture(capture.text, capture.timedOut)
+                    tag == TAG_SENSORS -> onSensorsCapture(capture.text, capture.timedOut)
+                    tag == TAG_CONTROL_MODULES -> onControlModulesCapture(capture.text)
+                    tag.startsWith(TAG_CONTROLS_PREFIX) ->
+                        onControlsCapture(tag.removePrefix(TAG_CONTROLS_PREFIX), capture.text)
                 }
             }
         }
@@ -161,10 +186,14 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _i2cLoading.value = false
     }
 
-    /** Lazily fetch the I²C device list (`devices json`) when the user expands that card. */
-    fun loadI2cDevices() {
+    /**
+     * Fetch the I²C device list (`devices json`). The status page calls this each poll with
+     * [silent] = true so the "found" count reflects the honest detected list; an explicit
+     * card expand calls it non-silent to show a spinner on the first load.
+     */
+    fun loadI2cDevices(silent: Boolean = false) {
         if (connectionState.value !is ConnectionState.Ready) return
-        _i2cLoading.value = true
+        if (!silent || _i2cDevices.value == null) _i2cLoading.value = true
         ble.sendCaptured("devices json", TAG_DEVICES)
     }
 
@@ -172,6 +201,126 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _i2cLoading.value = false
         if (timedOut || text.isBlank()) return // keep whatever we had; user can retry
         com.hardwareone.console.ble.I2cDevice.parseList(text)?.let { _i2cDevices.value = it }
+    }
+
+    // --- Sensors page ----------------------------------------------------------------
+
+    /** Poll the sensor snapshot (`sensors json`), captured off-console. */
+    fun refreshSensors() {
+        if (connectionState.value !is ConnectionState.Ready) {
+            _sensorsError.value = "Not connected."
+            return
+        }
+        _sensorsLoading.value = true
+        ble.sendCaptured("sensors json", TAG_SENSORS)
+    }
+
+    /** Drop the cached snapshot (call when leaving the page). */
+    fun clearSensors() {
+        _sensors.value = null
+        _sensorsError.value = null
+        _sensorsLoading.value = false
+        _controlModules.value = emptySet()
+        _controls.value = emptyMap()
+        _controlsLoading.value = emptySet()
+    }
+
+    /** Enable/disable a sensor. Most use `features <id> on|off`; a few need dedicated verbs. */
+    fun toggleSensor(id: String, enable: Boolean) {
+        // Optimistic local flip so the switch responds instantly; the next poll reconciles.
+        _sensors.value = _sensors.value?.map { if (it.id == id) it.copy(enabled = enable) else it }
+        ble.sendCommand(enableCommandFor(id, enable))
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(900) // give the firmware a moment to apply, then confirm
+            refreshSensors()
+        }
+    }
+
+    /**
+     * The live power command for a sensor's toggle: `open<id>`/`close<id>`, which actually
+     * starts/stops the sensor task. The firmware's `sensors json` `enabled` reflects this live
+     * running state, so the toggle binds to reality. (`features <id> on` / `<id>AutoStart` is only
+     * the persisted *boot* autostart — a separate knob in the Settings panel, not this toggle.)
+     * The open/close token differs from the `sensors json` id for the gamepad (unified under the
+     * "input" driver).
+     */
+    private fun enableCommandFor(id: String, enable: Boolean): String {
+        val verb = if (enable) "open" else "close"
+        return when (id) {
+            "gamepad" -> "${verb}input" // openinput / closeinput
+            "microphone" -> "${verb}mic" // openmic / closemic (if ever surfaced in sensors json)
+            // openimu, opentof, opengps, openfmradio, openapds, openpresence, openrtc, openthermal
+            else -> "$verb$id"
+        }
+    }
+
+    /** Run a per-sensor action verb (e.g. `fmradiotune 101.5`), then re-poll to reflect it. */
+    fun sensorAction(command: String) {
+        ble.sendCommand(command)
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(700)
+            refreshSensors()
+        }
+    }
+
+    private fun onSensorsCapture(text: String, timedOut: Boolean) {
+        _sensorsLoading.value = false
+        if (timedOut || text.isBlank()) {
+            if (_sensors.value == null) _sensorsError.value = "No response from device."
+            return
+        }
+        val snapshot = com.hardwareone.console.ble.SensorSnapshot.parse(text)
+        if (snapshot == null) {
+            // Likely the firmware doesn't implement `sensors json` yet (the plain `sensors`
+            // catalog isn't JSON). Don't clobber a previous good snapshot.
+            if (_sensors.value == null) {
+                _sensorsError.value = "Sensor readings aren't available yet (device firmware pending)."
+            }
+            return
+        }
+        _sensors.value = snapshot.sensors
+        _sensorsError.value = null
+    }
+
+    // --- Per-sensor controls (`controls json`) ---------------------------------------
+
+    /** Discover which modules expose adjustable settings (fetched once on page open). */
+    fun loadControlModules() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCaptured("controls json", TAG_CONTROL_MODULES)
+    }
+
+    /** Fetch one module's controls + live values (lazy, when its panel is opened). */
+    fun loadControls(moduleId: String) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        _controlsLoading.value = _controlsLoading.value + moduleId
+        ble.sendCaptured("controls json $moduleId", "$TAG_CONTROLS_PREFIX$moduleId")
+    }
+
+    /**
+     * Set one control: `<key> <token>` (case-insensitive on the device). [token] is already
+     * formatted by the UI (e.g. "on"/"off", "500", "0.2", an enum value). Re-fetches the module
+     * shortly after so the displayed value reflects the firmware's validated result.
+     */
+    fun setControl(moduleId: String, key: String, token: String) {
+        ble.sendCommand("$key $token")
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(700)
+            loadControls(moduleId)
+        }
+    }
+
+    private fun onControlModulesCapture(text: String) {
+        com.hardwareone.console.ble.ControlsModule.parseModuleList(text)?.let {
+            _controlModules.value = it.toSet()
+        }
+    }
+
+    private fun onControlsCapture(moduleId: String, text: String) {
+        _controlsLoading.value = _controlsLoading.value - moduleId
+        com.hardwareone.console.ble.ControlsModule.parse(text)?.let {
+            _controls.value = _controls.value + (moduleId to it)
+        }
     }
 
     private fun onStatusCapture(text: String, timedOut: Boolean) {
@@ -264,6 +413,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     // --- Encrypted log storage ---------------------------------------------------------
 
     val canSaveLogs: Boolean get() = logVault.canAuthenticate()
+
+    /** On-device path where the encrypted saved logs live (for the info dialog). */
+    val logStorageLocation: String get() = logVault.storageLocation()
     fun logAllowedAuthenticators(): Int = logVault.allowedAuthenticators()
 
     private val _autoSaveLogs = MutableStateFlow(logVault.autoSave)
@@ -391,5 +543,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val MAX_LOG_LINES = 2000
         const val TAG_STATUS = "status"
         const val TAG_DEVICES = "devices"
+        const val TAG_SENSORS = "sensors"
+        const val TAG_CONTROL_MODULES = "controlmods"
+        const val TAG_CONTROLS_PREFIX = "controls:"
     }
 }

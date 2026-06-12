@@ -1,5 +1,6 @@
 package com.hardwareone.console.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -29,6 +31,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hardwareone.console.R
 import com.hardwareone.console.ui.theme.LocalHwColors
@@ -40,7 +43,6 @@ fun LogViewerScreen(
     title: String,
     text: String,
     onExport: () -> Unit,
-    onLoadToConsole: () -> Unit,
     onDelete: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -53,6 +55,7 @@ fun LogViewerScreen(
                 .widthIn(max = 760.dp)
                 .padding(horizontal = 12.dp),
         ) {
+            // Header: back + name + EXPORT (kept up here so it's always visible).
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -70,7 +73,29 @@ fun LogViewerScreen(
                     color = hw.onGradient,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
+                Spacer(Modifier.size(8.dp))
+                OutlinedButton(
+                    onClick = onExport,
+                    border = BorderStroke(1.dp, hw.cardBorder),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = hw.onGradient),
+                ) { Text("EXPORT") }
+            }
+
+            // Delete (right-aligned, away from the back button).
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Spacer(Modifier.weight(1f))
+                OutlinedButton(
+                    onClick = onDelete,
+                    border = BorderStroke(1.dp, hw.cardBorder),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = hw.danger),
+                ) { Text("DELETE") }
             }
 
             // Decrypted log body (selectable, monospace, on the terminal panel).
@@ -90,33 +115,6 @@ fun LogViewerScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
-            }
-
-            Spacer(Modifier.size(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                OutlinedButton(
-                    onClick = onExport,
-                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
-                        contentColor = hw.onGradient,
-                    ),
-                ) { Text("EXPORT") }
-                OutlinedButton(
-                    onClick = onLoadToConsole,
-                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
-                        contentColor = hw.onGradient,
-                    ),
-                ) { Text("LOAD") }
-                Spacer(Modifier.weight(1f))
-                OutlinedButton(
-                    onClick = onDelete,
-                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
-                        contentColor = hw.danger,
-                    ),
-                ) { Text("DELETE") }
             }
         }
     }

@@ -12,8 +12,8 @@ android {
         applicationId = "com.hardwareone.console"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.4.0"
+        versionCode = 9
+        versionName = "1.6.0"
     }
 
     buildTypes {

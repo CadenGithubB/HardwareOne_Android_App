@@ -79,6 +79,7 @@ fun ConsoleScreen(
     foldPosture: FoldPosture,
     onOpenSettings: () -> Unit,
     onOpenStatus: () -> Unit,
+    onOpenSensors: () -> Unit,
     onLogin: (username: String, password: String, remember: Boolean) -> Unit,
     onLoginButton: () -> Unit,
 ) {
@@ -120,6 +121,7 @@ fun ConsoleScreen(
             onReadStatus = vm::readStatus,
             onSyncClock = vm::syncClock,
             onOpenStatus = onOpenStatus,
+            onOpenSensors = onOpenSensors,
             onClear = vm::clearLog,
             onSaveLog = saveLog,
             onOpenSettings = onOpenSettings,
@@ -219,6 +221,7 @@ private fun Header(
     onReadStatus: () -> Unit,
     onSyncClock: () -> Unit,
     onOpenStatus: () -> Unit,
+    onOpenSensors: () -> Unit,
     onClear: () -> Unit,
     onSaveLog: (() -> Unit)?,
     onOpenSettings: () -> Unit,
@@ -226,7 +229,7 @@ private fun Header(
     val controls: @Composable () -> Unit = {
         PrimaryConnectionButton(state, onScan, onStopScan, onDisconnect)
         ConsoleMenu(onSaveLog, onClear)
-        DeviceMenu(state, onReadStatus, onSyncClock, onOpenStatus, onReconnect)
+        DeviceMenu(state, onReadStatus, onSyncClock, onOpenStatus, onOpenSensors, onReconnect)
     }
     if (compact) {
         Column(
@@ -312,6 +315,7 @@ private fun DeviceMenu(
     onReadStatus: () -> Unit,
     onSyncClock: () -> Unit,
     onOpenStatus: () -> Unit,
+    onOpenSensors: () -> Unit,
     onReconnect: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -322,6 +326,10 @@ private fun DeviceMenu(
                 DropdownMenuItem(
                     text = { Text("Status page") },
                     onClick = { expanded = false; onOpenStatus() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Sensors") },
+                    onClick = { expanded = false; onOpenSensors() },
                 )
                 DropdownMenuItem(
                     text = { Text("Read status") },

@@ -17,17 +17,23 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.hardwareone.console.R
@@ -42,11 +48,12 @@ private val CardShape = RoundedCornerShape(14.dp)
 @Composable
 fun SavedLogsScreen(
     logs: List<SavedLog>,
+    storageLocation: String,
     onOpen: (SavedLog) -> Unit,
-    onDelete: (SavedLog) -> Unit,
     onBack: () -> Unit,
 ) {
     val hw = LocalHwColors.current
+    var showInfo by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier.fillMaxSize().background(Brush.linearGradient(hw.gradient)),
     ) {
@@ -73,6 +80,14 @@ fun SavedLogsScreen(
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold,
                     )
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = { showInfo = true }) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_info),
+                            contentDescription = "About saved logs",
+                            tint = hw.onGradient,
+                        )
+                    }
                 }
                 Spacer(Modifier.size(8.dp))
 
@@ -87,17 +102,55 @@ fun SavedLogsScreen(
                 } else {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(logs, key = { it.fileName }) { log ->
-                            SavedLogRow(log, onOpen = { onOpen(log) }, onDelete = { onDelete(log) })
+                            SavedLogRow(log, onOpen = { onOpen(log) })
                         }
                     }
                 }
             }
         }
     }
+
+    if (showInfo) {
+        val totalBytes = logs.sumOf { it.sizeBytes }
+        AlertDialog(
+            onDismissRequest = { showInfo = false },
+            confirmButton = { TextButton(onClick = { showInfo = false }) { Text("Got it") } },
+            title = { Text("About saved logs") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Saved logs live in this app's private storage:",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text = storageLocation,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "That folder isn't visible in a file manager (it's app-private, " +
+                            "so no other app can reach it) and each file is encrypted at rest — " +
+                            "its contents are AES-encrypted with a key wrapped by the Android " +
+                            "Keystore, on top of the OS's file-based encryption. To read one, " +
+                            "open it here (you'll be asked to authenticate); use a viewer's " +
+                            "Export for a plaintext copy.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text = "Total: ${formatSize(totalBytes)} across ${logs.size} " +
+                            if (logs.size == 1) "file" else "files",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            },
+        )
+    }
 }
 
 @Composable
-private fun SavedLogRow(log: SavedLog, onOpen: () -> Unit, onDelete: () -> Unit) {
+private fun SavedLogRow(log: SavedLog, onOpen: () -> Unit) {
     val hw = LocalHwColors.current
     Row(
         modifier = Modifier
@@ -121,7 +174,7 @@ private fun SavedLogRow(log: SavedLog, onOpen: () -> Unit, onDelete: () -> Unit)
                 style = MaterialTheme.typography.labelSmall,
             )
         }
-        TextButton(onClick = onDelete) { Text("Delete", color = hw.danger) }
+        Text("›", color = hw.muted, style = MaterialTheme.typography.titleLarge)
     }
 }
 

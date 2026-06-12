@@ -60,6 +60,9 @@ class LogVault(context: Context) {
         BiometricManager.from(appContext)
             .canAuthenticate(allowedAuthenticators()) == BiometricManager.BIOMETRIC_SUCCESS
 
+    /** Absolute on-device path of the (encrypted) saved-log directory, for info display. */
+    fun storageLocation(): String = dir.absolutePath
+
     // --- listing / deletion (no prompt) ---
 
     fun list(): List<SavedLog> =

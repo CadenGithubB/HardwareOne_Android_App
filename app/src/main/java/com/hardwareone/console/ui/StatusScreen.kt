@@ -268,6 +268,11 @@ private fun I2cCard(
 ) {
     val hw = LocalHwColors.current
     var expanded by remember { mutableStateOf(false) }
+    // "found" comes from the honest detected list (devices json) when we have it — the
+    // status-json scalar can over-count from a stale device registry. "active" can never
+    // exceed what's actually detected.
+    val foundCount = devices?.size ?: i2c.devices
+    val activeCount = if (devices != null) i2c.activeDevices.coerceAtMost(foundCount) else i2c.activeDevices
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -307,7 +312,7 @@ private fun I2cCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    text = "${i2c.activeDevices} active / ${i2c.devices} found",
+                    text = "$activeCount active / $foundCount found",
                     color = hw.onGradient,
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace,
