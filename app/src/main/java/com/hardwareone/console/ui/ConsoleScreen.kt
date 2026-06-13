@@ -70,7 +70,6 @@ fun ConsoleScreen(
     onOpenStatus: () -> Unit,
     onOpenSensors: () -> Unit,
     onOpenLlm: () -> Unit,
-    onLogin: (username: String, password: String, remember: Boolean) -> Unit,
     onLoginButton: () -> Unit,
 ) {
     val hw = LocalHwColors.current
@@ -78,9 +77,6 @@ fun ConsoleScreen(
     val log by vm.log.collectAsState()
     val authenticated by vm.authenticated.collectAsState()
     val currentUser by vm.currentUser.collectAsState()
-    val savedUsername by vm.savedUsername.collectAsState()
-    val canRememberCreds = vm.canUseCredentialStore
-    val showLogin by vm.loginDialogVisible.collectAsState()
 
     // rememberSaveable so a fold/unfold (or rotation) keeps the typed line.
     var input by rememberSaveable { mutableStateOf("") }
@@ -166,17 +162,6 @@ fun ConsoleScreen(
         }
     }
 
-    if (showLogin) {
-        LoginDialog(
-            initialUsername = savedUsername ?: "",
-            canRemember = canRememberCreds,
-            onDismiss = { vm.hideLoginDialog() },
-            onSubmit = { user, pass, remember ->
-                onLogin(user, pass, remember)
-                vm.hideLoginDialog()
-            },
-        )
-    }
 }
 
 @Composable
@@ -386,7 +371,7 @@ private fun InputBar(
 }
 
 @Composable
-private fun LoginDialog(
+internal fun LoginDialog(
     initialUsername: String,
     canRemember: Boolean,
     onDismiss: () -> Unit,

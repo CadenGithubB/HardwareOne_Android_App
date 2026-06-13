@@ -38,6 +38,7 @@ import com.hardwareone.console.ui.ConsoleScreen
 import com.hardwareone.console.ui.ConsoleViewModel
 import com.hardwareone.console.ui.DevicesScreen
 import com.hardwareone.console.ui.LlmChatScreen
+import com.hardwareone.console.ui.LoginDialog
 import com.hardwareone.console.ui.LogViewerScreen
 import com.hardwareone.console.ui.SavedLogsScreen
 import com.hardwareone.console.ui.SensorsScreen
@@ -152,10 +153,6 @@ class MainActivity : FragmentActivity() {
                             onOpenStatus = { navTo(Screen.Status) },
                             onOpenSensors = { navTo(Screen.Sensors) },
                             onOpenLlm = { navTo(Screen.LlmChat) },
-                            onLogin = { user, pass, remember ->
-                                vm.login(user, pass)
-                                if (remember) authAndSaveCredentials(user, pass)
-                            },
                             onLoginButton = ::onLoginButtonClicked,
                         )
                         AppPage.DEVICES -> {
@@ -173,6 +170,7 @@ class MainActivity : FragmentActivity() {
                                 vm = vm,
                                 battery = battery,
                                 onScanClicked = ::onScanClicked,
+                                onLogin = ::onLoginButtonClicked,
                                 onSelectPage = { topPage = it },
                                 onOpenSettings = { navTo(Screen.Settings) },
                             )
@@ -326,6 +324,23 @@ class MainActivity : FragmentActivity() {
                         onExport = { exportLog(screen.text) },
                         onDelete = { vm.deleteSavedLog(screen.fileName); navBack() },
                         onBack = { navBack() },
+                    )
+                }
+
+                // Login dialog as a global overlay so it works from any page (Console *and*
+                // Devices). Biometric login is Activity-level and already page-agnostic.
+                val showLogin by vm.loginDialogVisible.collectAsState()
+                if (showLogin) {
+                    val savedUsername by vm.savedUsername.collectAsState()
+                    LoginDialog(
+                        initialUsername = savedUsername ?: "",
+                        canRemember = vm.canUseCredentialStore,
+                        onDismiss = { vm.hideLoginDialog() },
+                        onSubmit = { user, pass, remember ->
+                            vm.login(user, pass)
+                            if (remember) authAndSaveCredentials(user, pass)
+                            vm.hideLoginDialog()
+                        },
                     )
                 }
             }

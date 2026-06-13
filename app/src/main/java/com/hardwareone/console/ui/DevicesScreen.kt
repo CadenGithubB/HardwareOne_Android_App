@@ -48,6 +48,7 @@ fun DevicesScreen(
     vm: ConsoleViewModel,
     battery: BatteryInfo?,
     onScanClicked: () -> Unit,
+    onLogin: () -> Unit,
     onSelectPage: (AppPage) -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -88,7 +89,12 @@ fun DevicesScreen(
                 // Only show the connection card once there's actually a device in play —
                 // a fresh launch (idle/disconnected) shows just the action buttons.
                 if (deviceInfo != null) {
-                    ConnectionCard(state, authenticated, currentUser, deviceInfo, battery)
+                    // Connected but not logged in → tap the card to log in (biometric or dialog,
+                    // same as the console LOGIN button).
+                    ConnectionCard(
+                        state, authenticated, currentUser, deviceInfo, battery,
+                        onLogin = if (ready && !authenticated) onLogin else null,
+                    )
                 }
 
                 Row(
@@ -122,6 +128,7 @@ private fun ConnectionCard(
     user: String?,
     deviceInfo: DeviceInfo?,
     battery: BatteryInfo?,
+    onLogin: (() -> Unit)? = null,
 ) {
     val hw = LocalHwColors.current
     Column(
@@ -130,6 +137,7 @@ private fun ConnectionCard(
             .clip(CardShape)
             .background(hw.cardBg)
             .border(1.dp, hw.cardBorder, CardShape)
+            .then(if (onLogin != null) Modifier.clickable { onLogin() } else Modifier)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -140,6 +148,13 @@ private fun ConnectionCard(
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
         )
+        if (onLogin != null) {
+            Text(
+                text = "Tap to log in",
+                color = hw.accent,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
         if (battery != null && battery.available) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
