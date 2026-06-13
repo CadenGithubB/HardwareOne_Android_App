@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,6 +39,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hardwareone.console.R
+import androidx.compose.ui.graphics.Color
+import com.hardwareone.console.ble.BatteryInfo
 import com.hardwareone.console.ble.DeviceStatus
 import com.hardwareone.console.ble.I2cDevice
 import com.hardwareone.console.ui.theme.LocalHwColors
@@ -51,11 +54,11 @@ private val CardShape = RoundedCornerShape(14.dp)
 @Composable
 fun StatusScreen(
     status: DeviceStatus?,
-    loading: Boolean,
     error: String?,
     i2cDevices: List<com.hardwareone.console.ble.I2cDevice>?,
     i2cLoading: Boolean,
     onLoadI2cDevices: () -> Unit,
+    battery: BatteryInfo?,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -95,10 +98,10 @@ fun StatusScreen(
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f),
                     )
-                    // One fixed IconButton; swap its contents so the spinner sits exactly where
-                    // the refresh icon was (same 48dp box, same centre) instead of jumping.
-                    IconButton(onClick = onRefresh, enabled = !loading) {
-                        if (loading) {
+                    // Spinner only during the first load (no panels yet); once data is in, the
+                    // refresh icon stays put so the silent auto-refresh doesn't flash it.
+                    IconButton(onClick = onRefresh, enabled = status != null) {
+                        if (status == null) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(24.dp),
                                 color = hw.onGradient,
@@ -116,23 +119,36 @@ fun StatusScreen(
 
                 Spacer(Modifier.height(8.dp))
 
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    if (error != null && status == null) {
-                        Banner(error)
+                Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    when {
+                        // Loaded — render the cards (silent auto-refresh updates them in place).
+                        status != null -> Column(
+                            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            StatusBody(status, error, i2cDevices, i2cLoading, onLoadI2cDevices, battery)
+                            Spacer(Modifier.height(8.dp))
+                        }
+                        // Couldn't load anything yet — surface the error.
+                        error != null -> Box(
+                            modifier = Modifier.fillMaxSize().padding(top = 16.dp),
+                            contentAlignment = Alignment.TopCenter,
+                        ) { Banner(error) }
+                        // First load with nothing yet — show the loading animation.
+                        else -> Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            CircularProgressIndicator(color = hw.onGradient, strokeWidth = 3.dp)
+                            Spacer(Modifier.height(14.dp))
+                            Text(
+                                text = "Loading device status…",
+                                color = hw.muted,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
                     }
-                    if (status == null && error == null) {
-                        Banner(if (loading) "Reading device status…" else "No status yet.")
-                    }
-                    status?.let {
-                        StatusBody(it, error, i2cDevices, i2cLoading, onLoadI2cDevices)
-                    }
-                    Spacer(Modifier.height(8.dp))
                 }
             }
         }
@@ -146,6 +162,7 @@ private fun StatusBody(
     i2cDevices: List<com.hardwareone.console.ble.I2cDevice>?,
     i2cLoading: Boolean,
     onLoadI2cDevices: () -> Unit,
+    battery: BatteryInfo?,
 ) {
     // A non-fatal error while we still have a previous snapshot (e.g. a transient OOM).
     if (staleError != null) Banner(staleError)
@@ -156,6 +173,9 @@ private fun StatusBody(
         InfoRow("Uptime", s.uptime.ifEmpty { "—" })
         InfoRow("Device time", s.systemTime.ifEmpty { "— (not synced)" })
     }
+
+    // Battery card — only when real battery hardware is present.
+    if (battery?.available == true) BatteryCard(battery)
 
     SectionCard("Health") {
         s.mem?.let {
@@ -252,6 +272,56 @@ private fun SectionCard(title: String, content: @Composable () -> Unit) {
             fontWeight = FontWeight.SemiBold,
         )
         content()
+    }
+}
+
+@Composable
+private fun BatteryCard(b: BatteryInfo) {
+    val hw = LocalHwColors.current
+    SectionCard("Battery") {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BatteryGlyph(b.percentage, b.charging)
+            Text(
+                text = if (b.percentage in 0..100) "${b.percentage}%" else "—",
+                color = hw.onGradient,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = if (b.charging) "Charging" else b.status.ifEmpty { "—" },
+                color = if (b.charging) hw.success else hw.muted,
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
+        InfoRow("Voltage", "%.2f V".format(b.voltage))
+        InfoRow("Source", batterySource(b))
+        b.ratePctPerHr?.takeIf { it != 0.0 }?.let { InfoRow("Rate", "%+.1f %%/hr".format(it)) }
+        b.etaMinutes?.takeIf { it > 0 }?.let {
+            InfoRow(if (b.charging) "Until full" else "Time left", formatEta(it))
+        }
+        if (b.usbPresent) InfoRow("USB", "connected")
+    }
+}
+
+private fun batterySource(b: BatteryInfo): String = when {
+    b.estimated -> "ADC (estimated)"
+    b.backend.equals("fuelgauge", ignoreCase = true) -> "Fuel gauge"
+    b.backend.isNotEmpty() -> b.backend
+    else -> "—"
+}
+
+private fun formatEta(minutes: Int): String {
+    val h = minutes / 60
+    val m = minutes % 60
+    return when {
+        h > 0 && m > 0 -> "${h}h ${m}m"
+        h > 0 -> "${h}h"
+        else -> "${m}m"
     }
 }
 

@@ -33,8 +33,11 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.hardwareone.console.ble.BleManager
 import com.hardwareone.console.ble.ConnectionState
 import com.hardwareone.console.security.SavedLog
+import com.hardwareone.console.ui.AppPage
 import com.hardwareone.console.ui.ConsoleScreen
 import com.hardwareone.console.ui.ConsoleViewModel
+import com.hardwareone.console.ui.DevicesScreen
+import com.hardwareone.console.ui.LlmChatScreen
 import com.hardwareone.console.ui.LogViewerScreen
 import com.hardwareone.console.ui.SavedLogsScreen
 import com.hardwareone.console.ui.SensorsScreen
@@ -63,20 +66,22 @@ class MainActivity : FragmentActivity() {
     /** One auto-login attempt per connection. */
     private var autoLoginHandled = false
 
-    /** Tiny navigation back-stack (snapshot list so Compose observes it). */
+    /** Top-level page (flipped by the header toggle); secondary screens push above it. */
+    private var topPage by mutableStateOf(AppPage.DEVICES)
+
+    /** Push stack of secondary screens above the current top page (empty = on a top page). */
     private sealed interface Screen {
-        data object Console : Screen
         data object Settings : Screen
         data object Status : Screen
         data object Sensors : Screen
+        data object LlmChat : Screen
         data object SavedLogs : Screen
         data class Viewer(val fileName: String, val title: String, val text: String) : Screen
     }
 
-    private val nav = mutableStateListOf<Screen>(Screen.Console)
+    private val nav = mutableStateListOf<Screen>()
     private fun navTo(screen: Screen) { nav.add(screen) }
-    private fun navBack() { if (nav.size > 1) nav.removeAt(nav.lastIndex) }
-    private fun navToConsole() { nav.clear(); nav.add(Screen.Console) }
+    private fun navBack() { if (nav.isNotEmpty()) nav.removeAt(nav.lastIndex) }
 
     private var pendingExportText: String = ""
 
@@ -129,26 +134,50 @@ class MainActivity : FragmentActivity() {
                 ThemePreference.DARK -> true
             }
             HardwareOneTheme(darkTheme = darkTheme) {
-                BackHandler(enabled = nav.size > 1) { navBack() }
+                BackHandler(enabled = nav.isNotEmpty() || topPage == AppPage.CONSOLE) {
+                    if (nav.isNotEmpty()) navBack() else topPage = AppPage.DEVICES
+                }
 
                 val widthSizeClass = calculateWindowSizeClass(this).widthSizeClass
                 val foldPosture = rememberFoldPosture(this)
 
-                when (val screen = nav.last()) {
-                    Screen.Console -> ConsoleScreen(
-                        vm = vm,
-                        onScanClicked = ::onScanClicked,
-                        widthSizeClass = widthSizeClass,
-                        foldPosture = foldPosture,
-                        onOpenSettings = { navTo(Screen.Settings) },
-                        onOpenStatus = { navTo(Screen.Status) },
-                        onOpenSensors = { navTo(Screen.Sensors) },
-                        onLogin = { user, pass, remember ->
-                            vm.login(user, pass)
-                            if (remember) authAndSaveCredentials(user, pass)
-                        },
-                        onLoginButton = ::onLoginButtonClicked,
-                    )
+                when (val screen = nav.lastOrNull()) {
+                    null -> when (topPage) {
+                        AppPage.CONSOLE -> ConsoleScreen(
+                            vm = vm,
+                            widthSizeClass = widthSizeClass,
+                            foldPosture = foldPosture,
+                            onSelectPage = { topPage = it },
+                            onOpenSettings = { navTo(Screen.Settings) },
+                            onOpenStatus = { navTo(Screen.Status) },
+                            onOpenSensors = { navTo(Screen.Sensors) },
+                            onOpenLlm = { navTo(Screen.LlmChat) },
+                            onLogin = { user, pass, remember ->
+                                vm.login(user, pass)
+                                if (remember) authAndSaveCredentials(user, pass)
+                            },
+                            onLoginButton = ::onLoginButtonClicked,
+                        )
+                        AppPage.DEVICES -> {
+                            val battery by vm.battery.collectAsState()
+                            // Poll battery while connected so the connection card shows it.
+                            LaunchedEffect(Unit) {
+                                repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                    while (true) {
+                                        vm.refreshBattery()
+                                        kotlinx.coroutines.delay(6_000)
+                                    }
+                                }
+                            }
+                            DevicesScreen(
+                                vm = vm,
+                                battery = battery,
+                                onScanClicked = ::onScanClicked,
+                                onSelectPage = { topPage = it },
+                                onOpenSettings = { navTo(Screen.Settings) },
+                            )
+                        }
+                    }
 
                     Screen.Settings -> {
                         val autoLogin by vm.autoLogin.collectAsState()
@@ -180,10 +209,10 @@ class MainActivity : FragmentActivity() {
 
                     Screen.Status -> {
                         val status by vm.deviceStatus.collectAsState()
-                        val loading by vm.statusLoading.collectAsState()
                         val statusError by vm.statusError.collectAsState()
                         val i2cDevices by vm.i2cDevices.collectAsState()
                         val i2cLoading by vm.i2cLoading.collectAsState()
+                        val battery by vm.battery.collectAsState()
                         // Poll while the page is open AND the app is in the foreground
                         // (request/response — no push/subscribe). repeatOnLifecycle cancels the
                         // loop on pause/screen-lock/background and restarts it on resume, so a
@@ -191,21 +220,24 @@ class MainActivity : FragmentActivity() {
                         LaunchedEffect(Unit) {
                             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                                 while (true) {
-                                    vm.refreshStatus()
-                                    // Also pull the real device list so the I²C "found" count
-                                    // matches it (the status-json scalar can over-count).
+                                    // Fetch the battery + device list FIRST so they're already
+                                    // in state when the status reply (which gates the page
+                                    // render) arrives — the page paints all at once, no pop-in.
+                                    // (devices json also fixes the I²C "found" count.)
+                                    vm.refreshBattery()
                                     vm.loadI2cDevices(silent = true)
+                                    vm.refreshStatus()
                                     kotlinx.coroutines.delay(3_000)
                                 }
                             }
                         }
                         StatusScreen(
                             status = status,
-                            loading = loading,
                             error = statusError,
                             i2cDevices = i2cDevices,
                             i2cLoading = i2cLoading,
                             onLoadI2cDevices = vm::loadI2cDevices,
+                            battery = battery,
                             onRefresh = vm::refreshStatus,
                             onBack = { vm.clearStatus(); navBack() },
                         )
@@ -223,7 +255,8 @@ class MainActivity : FragmentActivity() {
                                 vm.loadControlModules() // which sensors have adjustable settings
                                 while (true) {
                                     vm.refreshSensors()
-                                    kotlinx.coroutines.delay(2_500)
+                                    // Faster cadence so graphical redraws (gamepad) feel live.
+                                    kotlinx.coroutines.delay(1_000)
                                 }
                             }
                         }
@@ -240,6 +273,38 @@ class MainActivity : FragmentActivity() {
                             onAction = vm::sensorAction,
                             onRefresh = vm::refreshSensors,
                             onBack = { vm.clearSensors(); navBack() },
+                        )
+                    }
+
+                    Screen.LlmChat -> {
+                        val llmStatus by vm.llmStatus.collectAsState()
+                        val llmModels by vm.llmModels.collectAsState()
+                        val llmMessages by vm.llmMessages.collectAsState()
+                        val llmGenerating by vm.llmGenerating.collectAsState()
+                        LaunchedEffect(Unit) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                vm.refreshLlmModels()
+                                while (true) {
+                                    // Don't poll status while a generation is streaming — the
+                                    // result loop owns the capture channel then. Interleaving the
+                                    // two pollers risks desyncing command/reply pairing.
+                                    if (!vm.llmGenerating.value) vm.refreshLlmStatus()
+                                    kotlinx.coroutines.delay(2_000)
+                                }
+                            }
+                        }
+                        LlmChatScreen(
+                            status = llmStatus,
+                            models = llmModels,
+                            messages = llmMessages,
+                            generating = llmGenerating,
+                            onLoadModel = vm::loadLlmModel,
+                            onUnload = vm::unloadLlmModel,
+                            onSend = vm::sendLlmPrompt,
+                            onStop = vm::stopLlmGeneration,
+                            onRetry = vm::retryLlm,
+                            onClear = vm::clearLlmChat,
+                            onBack = { navBack() },
                         )
                     }
 

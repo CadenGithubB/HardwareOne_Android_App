@@ -213,6 +213,13 @@ private fun SensorCard(
             !entry.connected -> Note("Not detected on the bus.")
             !entry.enabled -> Note("Disabled — toggle on to read.")
             !entry.dataValid -> Note("Reading unavailable.")
+            // Graphical redraws for sensors that have one; everything else = generic rows.
+            entry.id == "input" && entry.numbers.containsKey("buttons") ->
+                GamepadView(
+                    x = entry.numbers["x"],
+                    y = entry.numbers["y"],
+                    buttons = (entry.numbers["buttons"] ?: 0.0).toLong(),
+                )
             entry.readings.isEmpty() -> Note("No readings yet.")
             else -> ReadingNodes(entry.readings, indent = 0.dp)
         }

@@ -556,6 +556,7 @@ class BleManager(context: Context) {
         captureTag = tag
         handler.removeCallbacks(captureTimeout)
         handler.postDelayed(captureTimeout, CAPTURE_TIMEOUT_MS)
+        android.util.Log.d("HW1CAP", "start tag=$tag cmd='${command.take(40)}'")
         sendCommand(command, watch = false)
     }
 
@@ -579,7 +580,14 @@ class BleManager(context: Context) {
             if (!text.endsWith("\n")) captureBuf.append('\n')
             true
         }
-        if (!claimed) return false
+        if (!claimed) {
+            android.util.Log.d("HW1CAP", "noclaim tag=$captureTag text='${text.take(40)}'")
+            return false
+        }
+        android.util.Log.d("HW1CAP", "claim tag=$captureTag text='${text.take(40)}'")
+        // Single-flush path (exactly one finishCapture per reply → no tag-shift race). Short
+        // quiet window keeps fast poll loops (LLM `llmresult`) responsive; in secure mode the
+        // capture already receives one complete reassembled line, so it's pure delay.
         handler.removeCallbacks(captureQuietFlush)
         handler.postDelayed(captureQuietFlush, CAPTURE_QUIET_MS)
         return true
@@ -593,6 +601,7 @@ class BleManager(context: Context) {
         val text = synchronized(captureLock) {
             captureBuf.toString().also { captureBuf.setLength(0) }
         }.trim()
+        android.util.Log.d("HW1CAP", "finish tag=$tag timedOut=$timedOut len=${text.length} '${text.take(50)}'")
         _captures.tryEmit(Capture(tag, text, timedOut = timedOut && text.isEmpty()))
         // Kick off the next queued capture, if any.
         val next = synchronized(captureLock) { pendingCaptures.removeFirstOrNull() }
@@ -841,7 +850,7 @@ class BleManager(context: Context) {
         private const val HANDSHAKE_TIMEOUT_MS = 6_000L
         private const val PSK_WAIT_TIMEOUT_MS = 6_000L
         private const val IDLE_FLUSH_MS = 250L
-        private const val CAPTURE_QUIET_MS = 450L
+        private const val CAPTURE_QUIET_MS = 80L
         private const val CAPTURE_TIMEOUT_MS = 5_000L
         private const val COMMAND_SILENCE_MS = 3_500L
 

@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hardwareone.console.ble.BleManager
 import com.hardwareone.console.ble.BleMessage
+import com.hardwareone.console.ble.ChatMessage
 import com.hardwareone.console.ble.ConnectionState
 import com.hardwareone.console.ble.DiscoveredDevice
 import com.hardwareone.console.security.CredentialStore
@@ -34,6 +35,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     val connectionState: StateFlow<ConnectionState> = ble.state
     val scanResults: StateFlow<List<DiscoveredDevice>> = ble.scanResults
     val authenticated: StateFlow<Boolean> = ble.authenticated
+
+    /** Username of the active session (shown in the status chip), or null when not logged in. */
+    private val _currentUser = MutableStateFlow<String?>(null)
+    val currentUser: StateFlow<String?> = _currentUser.asStateFlow()
+
+    /** Last username we attempted to log in with; committed to [_currentUser] on auth success. */
+    private var pendingUser: String? = null
     val deviceInfo: StateFlow<com.hardwareone.console.ble.DeviceInfo?> = ble.deviceInfo
 
     // --- Device status page (`status json`, captured off-console) ---
@@ -45,6 +53,27 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _statusLoading = MutableStateFlow(false)
     val statusLoading: StateFlow<Boolean> = _statusLoading.asStateFlow()
+
+    // Battery telemetry (`batterystatus json`) — fetched alongside the status poll, gated on
+    // `available` so boards with no battery hardware never show the card.
+    private val _battery = MutableStateFlow<com.hardwareone.console.ble.BatteryInfo?>(null)
+    val battery: StateFlow<com.hardwareone.console.ble.BatteryInfo?> = _battery.asStateFlow()
+
+    // --- On-device LLM chat ---
+    private val _llmStatus = MutableStateFlow<com.hardwareone.console.ble.LlmStatus?>(null)
+    val llmStatus: StateFlow<com.hardwareone.console.ble.LlmStatus?> = _llmStatus.asStateFlow()
+
+    private val _llmModels = MutableStateFlow<List<String>>(emptyList())
+    val llmModels: StateFlow<List<String>> = _llmModels.asStateFlow()
+
+    private val _llmMessages = MutableStateFlow<List<com.hardwareone.console.ble.ChatMessage>>(emptyList())
+    val llmMessages: StateFlow<List<com.hardwareone.console.ble.ChatMessage>> = _llmMessages.asStateFlow()
+
+    private val _llmGenerating = MutableStateFlow(false)
+    val llmGenerating: StateFlow<Boolean> = _llmGenerating.asStateFlow()
+
+    private var llmOffset = 0
+    private var llmActive = false // a generation is in progress (drives the result poll loop)
 
     // I²C device list (`devices json`), lazily loaded when the user expands the I²C card.
     // null = not loaded yet; empty list = loaded, none present.
@@ -114,17 +143,43 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 append(LogEntry(msg.text, msg.kind.toLogKind()))
             }
         }
+        // Tie the displayed username to real auth success: commit the pending login name when
+        // authenticated flips true, clear it on logout/disconnect.
+        viewModelScope.launch {
+            ble.authenticated.collect { authed ->
+                _currentUser.value = if (authed) pendingUser else null
+                if (authed) refreshBattery() // battery may need auth — fetch right after login
+            }
+        }
+        // Fetch battery the instant a device is Ready (no auth) so it's there on connect, not
+        // a poll-interval later. The auth branch above covers the login-required case.
+        viewModelScope.launch {
+            ble.state.collect { st -> if (st is ConnectionState.Ready) refreshBattery() }
+        }
         // Route captured (off-console) command replies to their pages.
         viewModelScope.launch {
             ble.captures.collect { capture ->
                 val tag = capture.tag
-                when {
-                    tag == TAG_STATUS -> onStatusCapture(capture.text, capture.timedOut)
-                    tag == TAG_DEVICES -> onDevicesCapture(capture.text, capture.timedOut)
-                    tag == TAG_SENSORS -> onSensorsCapture(capture.text, capture.timedOut)
-                    tag == TAG_CONTROL_MODULES -> onControlModulesCapture(capture.text)
-                    tag.startsWith(TAG_CONTROLS_PREFIX) ->
-                        onControlsCapture(tag.removePrefix(TAG_CONTROLS_PREFIX), capture.text)
+                // A single malformed/mis-routed reply must never crash the collector — that would
+                // silently kill ALL capture routing (every page goes dead). Isolate each handler.
+                try {
+                    when {
+                        tag == TAG_STATUS -> onStatusCapture(capture.text, capture.timedOut)
+                        tag == TAG_DEVICES -> onDevicesCapture(capture.text, capture.timedOut)
+                        tag == TAG_SENSORS -> onSensorsCapture(capture.text, capture.timedOut)
+                        tag == TAG_CONTROL_MODULES -> onControlModulesCapture(capture.text)
+                        tag == TAG_BATTERY -> onBatteryCapture(capture.text, capture.timedOut)
+                        tag == TAG_LLM_STATUS -> com.hardwareone.console.ble.LlmStatus.parse(capture.text)?.let { _llmStatus.value = it }
+                        tag == TAG_LLM_MODELS -> com.hardwareone.console.ble.LlmStatus.parseModels(capture.text)?.let { _llmModels.value = it }
+                        tag == TAG_LLM_GEN -> onLlmGenStart(capture.text, capture.timedOut)
+                        tag == TAG_LLM_RESULT -> onLlmResult(capture.text, capture.timedOut)
+                        tag.startsWith(TAG_CONTROLS_PREFIX) ->
+                            onControlsCapture(tag.removePrefix(TAG_CONTROLS_PREFIX), capture.text)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("ConsoleVM", "capture handler failed for tag=$tag", e)
+                    // If a generation poll's handler blew up, keep the stream alive.
+                    if (tag == TAG_LLM_RESULT && llmActive) pollLlmResult()
                 }
             }
         }
@@ -184,6 +239,18 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _statusLoading.value = false
         _i2cDevices.value = null
         _i2cLoading.value = false
+        _battery.value = null
+    }
+
+    /** Fetch battery telemetry (`batterystatus json`), captured off-console. */
+    fun refreshBattery() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCaptured("batterystatus json", TAG_BATTERY)
+    }
+
+    private fun onBatteryCapture(text: String, timedOut: Boolean) {
+        if (timedOut || text.isBlank()) return // keep the last reading
+        com.hardwareone.console.ble.BatteryInfo.parse(text)?.let { _battery.value = it }
     }
 
     /**
@@ -241,18 +308,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
      * starts/stops the sensor task. The firmware's `sensors json` `enabled` reflects this live
      * running state, so the toggle binds to reality. (`features <id> on` / `<id>AutoStart` is only
      * the persisted *boot* autostart — a separate knob in the Settings panel, not this toggle.)
-     * The open/close token differs from the `sensors json` id for the gamepad (unified under the
-     * "input" driver).
+     * Ids now match their verbs (e.g. "input" → openinput), so no per-sensor token overrides.
      */
-    private fun enableCommandFor(id: String, enable: Boolean): String {
-        val verb = if (enable) "open" else "close"
-        return when (id) {
-            "gamepad" -> "${verb}input" // openinput / closeinput
-            "microphone" -> "${verb}mic" // openmic / closemic (if ever surfaced in sensors json)
-            // openimu, opentof, opengps, openfmradio, openapds, openpresence, openrtc, openthermal
-            else -> "$verb$id"
-        }
-    }
+    private fun enableCommandFor(id: String, enable: Boolean): String =
+        (if (enable) "open" else "close") + id
 
     /** Run a per-sensor action verb (e.g. `fmradiotune 101.5`), then re-poll to reflect it. */
     fun sensorAction(command: String) {
@@ -323,6 +382,137 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // --- On-device LLM chat ----------------------------------------------------------
+
+    fun refreshLlmStatus() {
+        if (connectionState.value is ConnectionState.Ready) ble.sendCaptured("llmstatus json", TAG_LLM_STATUS)
+    }
+
+    fun refreshLlmModels() {
+        if (connectionState.value is ConnectionState.Ready) ble.sendCaptured("llmmodels json", TAG_LLM_MODELS)
+    }
+
+    // Fire-and-forget on the console (NOT captured): a captured command holds the single capture
+    // slot until its reply arrives, and a plain-text reply (older firmware) is never claimed → it
+    // would stall the whole queue for 5 s. State is read back via the status re-poll. Any JSON
+    // reply that gets claimed by an in-flight capture is tolerated by the robust collector.
+    fun loadLlmModel(name: String) {
+        ble.sendCommand("llmload $name")
+        viewModelScope.launch { kotlinx.coroutines.delay(800); refreshLlmStatus() }
+    }
+
+    fun unloadLlmModel() {
+        ble.sendCommand("llmunload")
+        viewModelScope.launch { kotlinx.coroutines.delay(400); refreshLlmStatus() }
+    }
+
+    fun stopLlmGeneration() {
+        llmActive = false
+        _llmGenerating.value = false
+        ble.sendCommand("llmstop")
+    }
+
+    fun clearLlmChat() {
+        val wasGenerating = _llmGenerating.value
+        llmActive = false
+        _llmGenerating.value = false
+        _llmMessages.value = emptyList()
+        // Reset the device-side conversation too. `llmclear` is refused mid-generation, so stop
+        // first. (Both are harmless no-ops if the firmware predates these commands.)
+        if (connectionState.value is ConnectionState.Ready) {
+            if (wasGenerating) ble.sendCommand("llmstop")
+            ble.sendCommand("llmclear")
+        }
+    }
+
+    /** Regenerate the last assistant reply (`llmretry` → session → stream like a normal turn). */
+    fun retryLlm() {
+        if (llmActive || connectionState.value !is ConnectionState.Ready) return
+        val msgs = _llmMessages.value.toMutableList()
+        val i = msgs.indexOfLast { it.role == ChatMessage.Role.ASSISTANT }
+        if (i < 0) return
+        msgs[i] = msgs[i].copy(text = "") // clear the bubble; the new reply streams into it
+        _llmMessages.value = msgs
+        llmOffset = 0
+        llmActive = true
+        _llmGenerating.value = true
+        ble.sendCaptured("llmretry", TAG_LLM_GEN) // {session} reply → onLlmGenStart → poll
+    }
+
+    /** Send a chat prompt: append the turn, start async generation, then poll for tokens. */
+    fun sendLlmPrompt(prompt: String) {
+        val p = prompt.trim()
+        if (p.isEmpty() || llmActive) return
+        if (connectionState.value !is ConnectionState.Ready) return
+        _llmMessages.value = _llmMessages.value +
+            ChatMessage(ChatMessage.Role.USER, p) + ChatMessage(ChatMessage.Role.ASSISTANT, "")
+        llmOffset = 0
+        llmActive = true
+        _llmGenerating.value = true
+        ble.sendCaptured("llmgenerate json $p", TAG_LLM_GEN)
+    }
+
+    private fun onLlmGenStart(text: String, timedOut: Boolean) {
+        android.util.Log.d("HW1LLM", "genStart timedOut=$timedOut text='${text.take(60)}'")
+        if (timedOut) { failLlm("No response starting generation."); return }
+        val o = runCatching { org.json.JSONObject(text) }.getOrNull()
+            ?: run { failLlm("LLM streaming isn't supported by this firmware yet."); return }
+        if (!o.optBoolean("ok", true) || (!o.has("session") && o.has("error"))) {
+            failLlm(o.optString("error", "Couldn't start generation.")); return
+        }
+        pollLlmResult()
+    }
+
+    private fun pollLlmResult() {
+        android.util.Log.d("HW1LLM", "poll off=$llmOffset active=$llmActive")
+        if (llmActive) ble.sendCaptured("llmresult json $llmOffset", TAG_LLM_RESULT)
+    }
+
+    private fun onLlmResult(text: String, timedOut: Boolean) {
+        if (!llmActive) return
+        if (timedOut) { failLlm("LLM stream timed out."); return }
+        val o = runCatching { org.json.JSONObject(text) }.getOrNull()
+        if (o == null) { failLlm("LLM streaming isn't supported by this firmware yet."); return }
+        if (!o.has("text") && !o.has("done")) {
+            // Valid JSON but not a result reply (e.g. a stray/mis-routed `llmstatus`) — don't kill
+            // the stream over it; just poll again.
+            viewModelScope.launch { kotlinx.coroutines.delay(200); pollLlmResult() }
+            return
+        }
+        val r = com.hardwareone.console.ble.LlmResult(
+            text = o.optString("text"),
+            done = o.optBoolean("done", false),
+            len = o.optInt("len", 0),
+        )
+        if (r.text.isNotEmpty()) appendAssistant(r.text)
+        // Each poll returns ≤512 bytes from `offset`; `len` is the total. Advance by what was
+        // actually returned (min(512, remaining)) and keep draining until offset == len, even
+        // after `done` flips true — the firmware's engine buffer keeps the tail readable.
+        llmOffset = minOf(llmOffset + 512, r.len)
+        when {
+            llmOffset < r.len -> pollLlmResult() // more is buffered — drain it now, no delay
+            r.done -> { llmActive = false; _llmGenerating.value = false }
+            else -> viewModelScope.launch { kotlinx.coroutines.delay(350); pollLlmResult() }
+        }
+    }
+
+    private fun appendAssistant(chunk: String) {
+        val msgs = _llmMessages.value.toMutableList()
+        val i = msgs.indexOfLast { it.role == ChatMessage.Role.ASSISTANT }
+        if (i >= 0) msgs[i] = msgs[i].copy(text = msgs[i].text + chunk)
+        _llmMessages.value = msgs
+    }
+
+    /** End generation with an error — keep any partial text, else show the message in the bubble. */
+    private fun failLlm(message: String) {
+        llmActive = false
+        _llmGenerating.value = false
+        val msgs = _llmMessages.value.toMutableList()
+        val i = msgs.indexOfLast { it.role == ChatMessage.Role.ASSISTANT }
+        if (i >= 0 && msgs[i].text.isBlank()) msgs[i] = msgs[i].copy(text = "⚠ $message")
+        _llmMessages.value = msgs
+    }
+
     private fun onStatusCapture(text: String, timedOut: Boolean) {
         _statusLoading.value = false
         if (timedOut || text.isBlank()) {
@@ -344,6 +534,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     fun send(rawInput: String) {
         val command = rawInput.trim()
         if (command.isEmpty()) return
+        // Capture the username from a typed `login <user> <pass>` so the status chip can show it.
+        val parts = command.split(Regex("\\s+"))
+        if (parts.size >= 3 && parts[0].equals("login", ignoreCase = true)) pendingUser = parts[1]
         append(LogEntry("> ${maskIfLogin(command)}", LogEntry.Kind.OUTGOING))
         ble.sendCommand(command)
     }
@@ -355,6 +548,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             append(LogEntry("Username and password are required.", LogEntry.Kind.ERROR))
             return
         }
+        pendingUser = user
         append(LogEntry("> login $user ********", LogEntry.Kind.OUTGOING))
         ble.sendCommand("login $user $password")
     }
@@ -546,5 +740,11 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_SENSORS = "sensors"
         const val TAG_CONTROL_MODULES = "controlmods"
         const val TAG_CONTROLS_PREFIX = "controls:"
+        const val TAG_BATTERY = "battery"
+        const val TAG_LLM_STATUS = "llmstatus"
+        const val TAG_LLM_MODELS = "llmmodels"
+        const val TAG_LLM_GEN = "llmgen"
+        const val TAG_LLM_RESULT = "llmresult"
+        const val TAG_LLM_CMD = "llmcmd" // one-shot load/unload/stop/clear; reply captured & ignored
     }
 }

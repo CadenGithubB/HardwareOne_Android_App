@@ -2,21 +2,18 @@ package com.hardwareone.console.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -27,14 +24,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -55,17 +48,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.hardwareone.console.R
 import com.hardwareone.console.ble.ConnectionState
-import com.hardwareone.console.ble.DiscoveredDevice
 import com.hardwareone.console.ui.theme.HwColors
 import com.hardwareone.console.ui.theme.LocalHwColors
 
@@ -74,20 +63,21 @@ private val CardShape = RoundedCornerShape(14.dp)
 @Composable
 fun ConsoleScreen(
     vm: ConsoleViewModel,
-    onScanClicked: () -> Unit,
     widthSizeClass: WindowWidthSizeClass,
     foldPosture: FoldPosture,
+    onSelectPage: (AppPage) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenStatus: () -> Unit,
     onOpenSensors: () -> Unit,
+    onOpenLlm: () -> Unit,
     onLogin: (username: String, password: String, remember: Boolean) -> Unit,
     onLoginButton: () -> Unit,
 ) {
     val hw = LocalHwColors.current
     val state by vm.connectionState.collectAsState()
     val log by vm.log.collectAsState()
-    val devices by vm.scanResults.collectAsState()
     val authenticated by vm.authenticated.collectAsState()
+    val currentUser by vm.currentUser.collectAsState()
     val savedUsername by vm.savedUsername.collectAsState()
     val canRememberCreds = vm.canUseCredentialStore
     val showLogin by vm.loginDialogVisible.collectAsState()
@@ -96,38 +86,25 @@ fun ConsoleScreen(
     var input by rememberSaveable { mutableStateOf("") }
 
     val ready = state is ConnectionState.Ready
-    val connecting = state is ConnectionState.Connecting ||
-        state is ConnectionState.DiscoveringServices ||
-        state is ConnectionState.NegotiatingMtu ||
-        state is ConnectionState.EnablingNotifications ||
-        state is ConnectionState.Securing
-    val showDevices = !ready && !connecting && devices.isNotEmpty()
-
-    // Compact = narrow portrait phone / folded cover screen. Wider (landscape, unfolded,
-    // tablet) gets a single-row header.
     val isCompact = widthSizeClass == WindowWidthSizeClass.Compact
 
-    // Reusable UI slots so the stacked and tabletop layouts share one source of truth.
     val saveLog: (() -> Unit)? = if (vm.canSaveLogs) ({ vm.saveCurrentLog() }) else null
     val header: @Composable () -> Unit = {
         Header(
             state = state,
             authenticated = authenticated,
-            compact = isCompact,
-            onScan = onScanClicked,
-            onStopScan = vm::stopScan,
-            onDisconnect = vm::disconnect,
-            onReconnect = vm::reconnect,
+            user = currentUser,
+            onSelectPage = onSelectPage,
             onReadStatus = vm::readStatus,
             onSyncClock = vm::syncClock,
             onOpenStatus = onOpenStatus,
             onOpenSensors = onOpenSensors,
+            onOpenLlm = onOpenLlm,
             onClear = vm::clearLog,
             onSaveLog = saveLog,
             onOpenSettings = onOpenSettings,
         )
     }
-    val deviceList: @Composable () -> Unit = { DeviceList(devices, vm::connect) }
     val logView: @Composable (Modifier) -> Unit = { m -> LogView(log, m) }
     val inputBar: @Composable () -> Unit = {
         InputBar(
@@ -141,15 +118,10 @@ fun ConsoleScreen(
     }
 
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Brush.linearGradient(hw.gradient)),
+        modifier = Modifier.fillMaxSize().background(Brush.linearGradient(hw.gradient)),
     ) {
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .systemBarsPadding()
-                .imePadding(),
+            modifier = Modifier.fillMaxSize().systemBarsPadding().imePadding(),
             contentAlignment = Alignment.TopCenter,
         ) {
             val columnModifier =
@@ -174,7 +146,6 @@ fun ConsoleScreen(
                             modifier = Modifier.weight(1f).fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            if (showDevices) deviceList()
                             Spacer(Modifier.weight(1f))
                             inputBar()
                         }
@@ -187,7 +158,6 @@ fun ConsoleScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         header()
-                        if (showDevices) deviceList()
                         logView(Modifier.weight(1f).fillMaxWidth())
                         inputBar()
                     }
@@ -213,77 +183,51 @@ fun ConsoleScreen(
 private fun Header(
     state: ConnectionState,
     authenticated: Boolean,
-    compact: Boolean,
-    onScan: () -> Unit,
-    onStopScan: () -> Unit,
-    onDisconnect: () -> Unit,
-    onReconnect: () -> Unit,
+    user: String?,
+    onSelectPage: (AppPage) -> Unit,
     onReadStatus: () -> Unit,
     onSyncClock: () -> Unit,
     onOpenStatus: () -> Unit,
     onOpenSensors: () -> Unit,
+    onOpenLlm: () -> Unit,
     onClear: () -> Unit,
     onSaveLog: (() -> Unit)?,
     onOpenSettings: () -> Unit,
 ) {
-    val controls: @Composable () -> Unit = {
-        PrimaryConnectionButton(state, onScan, onStopScan, onDisconnect)
-        ConsoleMenu(onSaveLog, onClear)
-        DeviceMenu(state, onReadStatus, onSyncClock, onOpenStatus, onOpenSensors, onReconnect)
-    }
-    if (compact) {
-        Column(
-            modifier = Modifier.padding(top = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                TitleStatus(state, authenticated)
-                GearButton(onOpenSettings)
-            }
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) { controls() }
-        }
-    } else {
+    val hw = LocalHwColors.current
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        // Row 1: all controls (toggle, menus, settings).
         Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            TitleStatus(state, authenticated)
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) { controls() }
-            Spacer(Modifier.width(8.dp))
+            PageToggle(AppPage.CONSOLE, onSelectPage)
+            ConsoleMenu(onSaveLog, onClear)
+            DeviceMenu(
+                state = state,
+                onReadStatus = onReadStatus,
+                onSyncClock = onSyncClock,
+                onOpenStatus = onOpenStatus,
+                onOpenSensors = onOpenSensors,
+                onOpenLlm = onOpenLlm,
+                onConnect = { onSelectPage(AppPage.DEVICES) },
+            )
+            Spacer(Modifier.weight(1f))
             GearButton(onOpenSettings)
         }
-    }
-}
-
-/** Single state-driven connection button (SCAN / STOP / CANCEL / DISCONNECT). */
-@Composable
-private fun PrimaryConnectionButton(
-    state: ConnectionState,
-    onScan: () -> Unit,
-    onStopScan: () -> Unit,
-    onDisconnect: () -> Unit,
-) {
-    when (state) {
-        is ConnectionState.Scanning -> {
-            SecondaryButton(onStopScan, "STOP")
-            Spinner()
-        }
-        is ConnectionState.Connecting,
-        is ConnectionState.DiscoveringServices,
-        is ConnectionState.NegotiatingMtu,
-        is ConnectionState.EnablingNotifications,
-        is ConnectionState.Securing -> {
-            SecondaryButton(onDisconnect, "CANCEL")
-            Spinner()
-        }
-        is ConnectionState.Ready -> SecondaryButton(onDisconnect, "DISCONNECT")
-        else -> PrimaryButton(onScan, text = "SCAN")
+        // Row 2: connection / login status, always on its own line.
+        Text(
+            text = statusLabel(state, authenticated, user),
+            color = statusColor(state, hw),
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(start = 4.dp),
+        )
     }
 }
 
@@ -308,7 +252,7 @@ private fun ConsoleMenu(onSaveLog: (() -> Unit)?, onClear: () -> Unit) {
     }
 }
 
-/** "Device ▾" menu: device actions only (status page / read status / sync clock / reconnect). */
+/** "Device ▾" menu: device actions when connected; otherwise jump to the Devices page. */
 @Composable
 private fun DeviceMenu(
     state: ConnectionState,
@@ -316,7 +260,8 @@ private fun DeviceMenu(
     onSyncClock: () -> Unit,
     onOpenStatus: () -> Unit,
     onOpenSensors: () -> Unit,
-    onReconnect: () -> Unit,
+    onOpenLlm: () -> Unit,
+    onConnect: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
@@ -332,6 +277,10 @@ private fun DeviceMenu(
                     onClick = { expanded = false; onOpenSensors() },
                 )
                 DropdownMenuItem(
+                    text = { Text("LLM chat") },
+                    onClick = { expanded = false; onOpenLlm() },
+                )
+                DropdownMenuItem(
                     text = { Text("Read status") },
                     onClick = { expanded = false; onReadStatus() },
                 )
@@ -341,8 +290,8 @@ private fun DeviceMenu(
                 )
             } else {
                 DropdownMenuItem(
-                    text = { Text("Reconnect") },
-                    onClick = { expanded = false; onReconnect() },
+                    text = { Text("Connect…") },
+                    onClick = { expanded = false; onConnect() },
                 )
             }
         }
@@ -357,85 +306,8 @@ private fun MenuButton(label: String, onClick: () -> Unit) {
         onClick = onClick,
         border = BorderStroke(1.dp, hw.cardBorder),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = hw.onGradient),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
     ) { Text("$label ▾") }
-}
-
-@Composable
-private fun RowScope.TitleStatus(state: ConnectionState, authenticated: Boolean) {
-    val hw = LocalHwColors.current
-    Text(
-        text = "HardwareOne",
-        color = hw.onGradient,
-        style = MaterialTheme.typography.titleLarge,
-        fontWeight = FontWeight.SemiBold,
-    )
-    Spacer(Modifier.width(10.dp))
-    Text(
-        text = statusLabel(state, authenticated),
-        color = statusColor(state, hw),
-        style = MaterialTheme.typography.labelMedium,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.weight(1f),
-    )
-}
-
-@Composable
-private fun GearButton(onOpenSettings: () -> Unit) {
-    IconButton(onClick = onOpenSettings) {
-        Icon(
-            painter = painterResource(R.drawable.ic_settings),
-            contentDescription = "Settings",
-            tint = LocalHwColors.current.onGradient,
-        )
-    }
-}
-
-@Composable
-private fun DeviceList(
-    devices: List<DiscoveredDevice>,
-    onConnect: (DiscoveredDevice) -> Unit,
-) {
-    val hw = LocalHwColors.current
-    Column(
-        modifier = Modifier
-            .clip(CardShape)
-            .background(hw.cardBg)
-            .border(1.dp, hw.cardBorder, CardShape)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-    ) {
-        Text(
-            text = "Devices (${devices.size}) — tap to connect",
-            color = hw.muted,
-            style = MaterialTheme.typography.labelMedium,
-        )
-        LazyColumn(modifier = Modifier.heightIn(max = 160.dp)) {
-            items(devices, key = { it.address }) { device ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onConnect(device) }
-                        .padding(vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "${device.name}  ·  ${device.address}",
-                        color = hw.onGradient,
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        text = "${device.rssi} dBm",
-                        color = hw.muted,
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-            }
-        }
-    }
 }
 
 @Composable
@@ -565,69 +437,9 @@ private fun LoginDialog(
     )
 }
 
-// --- shared button styles ---------------------------------------------------------
-
-/** Solid light button with accent text — the primary action, high-contrast on the gradient. */
-@Composable
-private fun PrimaryButton(onClick: () -> Unit, enabled: Boolean = true, text: String) {
-    val hw = LocalHwColors.current
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = hw.onGradient,
-            contentColor = hw.accent,
-            disabledContainerColor = hw.cardBg,
-            disabledContentColor = hw.muted,
-        ),
-    ) { Text(text) }
-}
-
-/** Frosted outlined button — secondary actions. */
-@Composable
-private fun SecondaryButton(onClick: () -> Unit, text: String) {
-    val hw = LocalHwColors.current
-    OutlinedButton(
-        onClick = onClick,
-        border = BorderStroke(1.dp, hw.cardBorder),
-        colors = ButtonDefaults.outlinedButtonColors(contentColor = hw.onGradient),
-    ) { Text(text) }
-}
-
-@Composable
-private fun Spinner() {
-    CircularProgressIndicator(
-        modifier = Modifier.size(20.dp),
-        color = LocalHwColors.current.onGradient,
-        strokeWidth = 2.dp,
-    )
-}
-
-// --- small helpers ----------------------------------------------------------------
-
 private fun colorFor(kind: LogEntry.Kind, hw: HwColors): Color = when (kind) {
     LogEntry.Kind.OUTGOING -> hw.logOut
     LogEntry.Kind.INCOMING -> hw.logIn
     LogEntry.Kind.INFO -> hw.logInfo
     LogEntry.Kind.ERROR -> hw.logError
-}
-
-private fun statusLabel(state: ConnectionState, authenticated: Boolean): String = when (state) {
-    is ConnectionState.Disconnected -> "● disconnected"
-    is ConnectionState.Scanning -> "◌ scanning"
-    is ConnectionState.Connecting -> "◌ connecting"
-    is ConnectionState.DiscoveringServices -> "◌ discovering"
-    is ConnectionState.NegotiatingMtu -> "◌ mtu"
-    is ConnectionState.EnablingNotifications -> "◌ subscribing"
-    is ConnectionState.Securing -> "◌ securing"
-    is ConnectionState.Ready ->
-        if (authenticated) "● online (mtu ${state.mtu})" else "● connected — login required"
-    is ConnectionState.Failed -> "● ${state.reason}"
-}
-
-private fun statusColor(state: ConnectionState, hw: HwColors): Color = when (state) {
-    is ConnectionState.Ready -> hw.success
-    is ConnectionState.Failed -> hw.danger
-    is ConnectionState.Disconnected -> hw.muted
-    else -> hw.onGradient
 }
