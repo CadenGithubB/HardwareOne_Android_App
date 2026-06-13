@@ -673,6 +673,15 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     fun unloadLlmModel() {
         _llmUnloading.value = true
         _llmLoadingModel.value = null
+        // Reset both LLM panels to a blank UNLOADED state immediately so the model/tok-s don't
+        // linger stale until the next poll — the chat ModelBar (llmstatus) and the Status page's
+        // "On-device LLM" card (status json connectivity.llm). Polling then keeps them accurate.
+        _llmStatus.value = com.hardwareone.console.ble.LlmStatus(state = "UNLOADED", model = "", tokPerSec = 0.0, error = "")
+        _deviceStatus.value = _deviceStatus.value?.let { ds ->
+            val c = ds.connectivity ?: return@let ds
+            val l = c.llm ?: return@let ds
+            ds.copy(connectivity = c.copy(llm = l.copy(state = "UNLOADED", model = "", psramKb = 0, tokPerSec = 0.0)))
+        }
         ble.sendCommand("llmunload")
         viewModelScope.launch { kotlinx.coroutines.delay(400); refreshLlmStatus() }
         viewModelScope.launch { kotlinx.coroutines.delay(15_000); _llmUnloading.value = false }
