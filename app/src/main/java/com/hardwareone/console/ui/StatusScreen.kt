@@ -177,15 +177,20 @@ private fun StatusBody(
     // Battery card — only when real battery hardware is present.
     if (battery?.available == true) BatteryCard(battery)
 
-    SectionCard("Health") {
-        s.mem?.let {
-            InfoRow("Heap free", "${it.heapFreeKb} / ${it.heapTotalKb} KB")
-            if (it.psramTotalKb > 0) InfoRow("PSRAM free", "${it.psramFreeKb} / ${it.psramTotalKb} KB")
+    if (s.mem != null || s.storage != null) {
+        SectionCard("Memory") {
+            s.mem?.let {
+                InfoRow("Heap free", "${it.heapFreeKb} / ${it.heapTotalKb} KB")
+                if (it.psramTotalKb > 0) InfoRow("PSRAM free", "${it.psramFreeKb} / ${it.psramTotalKb} KB")
+            }
+            s.storage?.let {
+                InfoRow("Flash used", "${it.usedKb} / ${it.totalKb} KB (${it.freeKb} free)")
+                it.sd?.let { sd -> InfoRow("SD used", "${sd.usedMb} / ${sd.totalMb} MB (${sd.freeMb} free)") }
+            }
         }
-        s.storage?.let {
-            InfoRow("Flash used", "${it.usedKb} / ${it.totalKb} KB (${it.freeKb} free)")
-            it.sd?.let { sd -> InfoRow("SD used", "${sd.usedMb} / ${sd.totalMb} MB (${sd.freeMb} free)") }
-        }
+    }
+
+    SectionCard("Power cycle") {
         InfoRow("Last reset", s.resetReason.ifEmpty { "—" })
         InfoRow("Crash count", s.crashCount.toString())
     }

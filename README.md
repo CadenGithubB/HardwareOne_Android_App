@@ -1,4 +1,4 @@
-# HardwareOne Console (Android) — v1.9.6
+# HardwareOne Console (Android) — v2.0.0
 
 A **Google-free** Android app that scans for, connects to, and controls an **ESP32-S3
 "HardwareOne"** device over **Bluetooth LE** — a terminal-style console plus purpose-built
@@ -8,7 +8,8 @@ ChaCha20-Poly1305) that makes the link confidential **without any BLE pairing/bo
 
 - **More than a console:** a **Devices** page (scan / connect / battery) and a **Console**,
   plus drill-in pages for **device status**, **sensors** (with a live gamepad visualizer),
-  **battery**, and **on-device LLM chat** (replies streamed token-by-token).
+  **battery**, **on-device LLM chat** (replies streamed token-by-token), and a **file
+  browser** (browse / view / upload / manage device files over the encrypted channel).
 - **No Firebase, no Play Services, no analytics, no Nearby/Fast Pair.** Only
   `android.bluetooth.*` plus FOSS libraries (AndroidX, BouncyCastle).
 - **No `INTERNET` permission.** The app cannot talk to the network at all.
@@ -222,6 +223,10 @@ When connected, **Device ▾** opens the device tools:
 - **LLM chat** — on-device LLM over BLE: pick/load a model, send a prompt, and watch the
   reply **stream token-by-token**; **Stop**, **Retry**, and **Clear** (which also resets the
   device-side conversation). See [docs/BLE_LLM_INTEGRATION.md](docs/BLE_LLM_INTEGRATION.md).
+- **Files** — a file browser over BLE: list directories with storage usage, view text files,
+  **upload** files from the phone (chunked, base64 over the secure channel), and create /
+  rename / delete (each action gated by the firmware's per-entry permission bits). Requires
+  the **Secure Channel** and an **admin** login. Large media (> 256 KB) is steered to the web.
 - **Read status**, **Sync clock**, or **Reconnect** when disconnected.
 
 ---
@@ -263,7 +268,8 @@ app/src/main/
 │   │   ├── SensorSnapshot.kt     `sensors json` model
 │   │   ├── SensorControls.kt     `controls json` model
 │   │   ├── BatteryInfo.kt        `batterystatus json` model
-│   │   └── LlmModels.kt          LLM status / result / chat-message models
+│   │   ├── LlmModels.kt          LLM status / result / chat-message models
+│   │   └── FileModels.kt         file-browser models (listing/stats/read/write + perms)
 │   ├── security/
 │   │   ├── SecureChannel.kt      X25519/HKDF/ChaCha20-Poly1305 handshake (BouncyCastle)
 │   │   ├── CredentialStore.kt    login password — auth-gated AES-GCM Keystore
@@ -279,6 +285,7 @@ app/src/main/
 │       ├── SensorVisualizers.kt  live gamepad (joystick / buttons) visualizer
 │       ├── SensorActions.kt      per-sensor documented-action registry
 │       ├── LlmChatScreen.kt      on-device LLM chat (streamed replies, load/stop/retry/clear)
+│       ├── FilesScreen.kt        BLE file browser (browse/view/upload/manage + picker)
 │       ├── SettingsScreen.kt     appearance · credentials · logs · secure channel
 │       ├── SavedLogsScreen.kt    encrypted saved-log list (+ storage info)
 │       ├── LogViewerScreen.kt    decrypted viewer + plaintext export

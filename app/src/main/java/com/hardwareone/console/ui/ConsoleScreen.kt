@@ -70,6 +70,7 @@ fun ConsoleScreen(
     onOpenStatus: () -> Unit,
     onOpenSensors: () -> Unit,
     onOpenLlm: () -> Unit,
+    onOpenFiles: () -> Unit,
     onLoginButton: () -> Unit,
 ) {
     val hw = LocalHwColors.current
@@ -96,6 +97,7 @@ fun ConsoleScreen(
             onOpenStatus = onOpenStatus,
             onOpenSensors = onOpenSensors,
             onOpenLlm = onOpenLlm,
+            onOpenFiles = onOpenFiles,
             onClear = vm::clearLog,
             onSaveLog = saveLog,
             onOpenSettings = onOpenSettings,
@@ -175,6 +177,7 @@ private fun Header(
     onOpenStatus: () -> Unit,
     onOpenSensors: () -> Unit,
     onOpenLlm: () -> Unit,
+    onOpenFiles: () -> Unit,
     onClear: () -> Unit,
     onSaveLog: (() -> Unit)?,
     onOpenSettings: () -> Unit,
@@ -199,6 +202,7 @@ private fun Header(
                 onOpenStatus = onOpenStatus,
                 onOpenSensors = onOpenSensors,
                 onOpenLlm = onOpenLlm,
+                onOpenFiles = onOpenFiles,
                 onConnect = { onSelectPage(AppPage.DEVICES) },
             )
             Spacer(Modifier.weight(1f))
@@ -246,6 +250,7 @@ private fun DeviceMenu(
     onOpenStatus: () -> Unit,
     onOpenSensors: () -> Unit,
     onOpenLlm: () -> Unit,
+    onOpenFiles: () -> Unit,
     onConnect: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -264,6 +269,10 @@ private fun DeviceMenu(
                 DropdownMenuItem(
                     text = { Text("LLM chat") },
                     onClick = { expanded = false; onOpenLlm() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Files") },
+                    onClick = { expanded = false; onOpenFiles() },
                 )
                 DropdownMenuItem(
                     text = { Text("Read status") },

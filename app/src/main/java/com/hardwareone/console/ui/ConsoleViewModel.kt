@@ -76,6 +76,35 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private var llmActive = false // a generation is in progress (drives the result poll loop)
     private var llmDoTurn = false // current turn is a `Do:` command-suggestion turn
 
+    // --- File browser (BLE file commands; require secure channel + admin) ---
+    private val _filesPath = MutableStateFlow("/")
+    val filesPath: StateFlow<String> = _filesPath.asStateFlow()
+    private val _fileListing = MutableStateFlow<com.hardwareone.console.ble.FileListing?>(null)
+    val fileListing: StateFlow<com.hardwareone.console.ble.FileListing?> = _fileListing.asStateFlow()
+    private val _fileStats = MutableStateFlow<com.hardwareone.console.ble.FileStats?>(null)
+    val fileStats: StateFlow<com.hardwareone.console.ble.FileStats?> = _fileStats.asStateFlow()
+    private val _filesBusy = MutableStateFlow(false)
+    val filesBusy: StateFlow<Boolean> = _filesBusy.asStateFlow()
+    private val _fileViewer = MutableStateFlow<com.hardwareone.console.ble.FileViewerState?>(null)
+    val fileViewer: StateFlow<com.hardwareone.console.ble.FileViewerState?> = _fileViewer.asStateFlow()
+    private val _fileTransfer = MutableStateFlow<com.hardwareone.console.ble.FileTransfer?>(null)
+    val fileTransfer: StateFlow<com.hardwareone.console.ble.FileTransfer?> = _fileTransfer.asStateFlow()
+    // A finished download's (filename, bytes) waiting for the UI to save it to the phone.
+    private val _downloadReady = MutableStateFlow<Pair<String, ByteArray>?>(null)
+    val downloadReady: StateFlow<Pair<String, ByteArray>?> = _downloadReady.asStateFlow()
+
+    // Read-loop state (viewing/download).
+    private var readPath = ""
+    private var readOffset = 0L
+    private var readForDownload = false
+    private var fileOpCancelled = false // user stopped an in-flight upload/download
+    private val readBuf = java.io.ByteArrayOutputStream()
+    // Write-loop state (upload).
+    private var writePath = ""
+    private var writeBytes: ByteArray? = null
+    private var writeOffset = 0L
+    private var writeSentFinal = false
+
     // I²C device list (`devices json`), lazily loaded when the user expands the I²C card.
     // null = not loaded yet; empty list = loaded, none present.
     private val _i2cDevices = MutableStateFlow<List<com.hardwareone.console.ble.I2cDevice>?>(null)
@@ -174,6 +203,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_LLM_MODELS -> com.hardwareone.console.ble.LlmStatus.parseModels(capture.text)?.let { _llmModels.value = it }
                         tag == TAG_LLM_GEN -> onLlmGenStart(capture.text, capture.timedOut)
                         tag == TAG_LLM_RESULT -> onLlmResult(capture.text, capture.timedOut)
+                        tag == TAG_FILES -> onFilesCapture(capture.text, capture.timedOut)
+                        tag == TAG_FILE_STATS -> onFileStatsCapture(capture.text)
+                        tag == TAG_FILE_READ -> onFileReadCapture(capture.text, capture.timedOut)
+                        tag == TAG_FILE_WRITE -> onFileWriteCapture(capture.text, capture.timedOut)
                         tag.startsWith(TAG_CONTROLS_PREFIX) ->
                             onControlsCapture(tag.removePrefix(TAG_CONTROLS_PREFIX), capture.text)
                     }
@@ -374,6 +407,222 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         com.hardwareone.console.ble.ControlsModule.parseModuleList(text)?.let {
             _controlModules.value = it.toSet()
         }
+    }
+
+    // --- File browser -------------------------------------------------------------------
+    //
+    // BLE file commands require an established Secure Channel + admin login. JSON-reply commands
+    // (files/fileread/filewrite) are captured; the text-reply verbs (mkdir/filecreate/filerename/
+    // filedelete) reply on the console, so we reload the listing to reflect the result.
+
+    private val readWindow = 2048
+
+    fun joinPath(dir: String, name: String): String =
+        if (dir.endsWith("/")) "$dir$name" else "$dir/$name"
+
+    private fun parentPath(path: String): String {
+        if (path == "/" || path.isEmpty()) return "/"
+        val trimmed = path.trimEnd('/')
+        val cut = trimmed.lastIndexOf('/')
+        return if (cut <= 0) "/" else trimmed.substring(0, cut)
+    }
+
+    fun loadFiles(path: String = _filesPath.value) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        _filesPath.value = path
+        _fileListing.value = null
+        _filesBusy.value = true
+        ble.sendCaptured("files json $path", TAG_FILES)
+        ble.sendCaptured("files stats json $path", TAG_FILE_STATS)
+    }
+
+    fun openDir(name: String) = loadFiles(joinPath(_filesPath.value, name))
+    fun navigateUp() { if (_filesPath.value != "/") loadFiles(parentPath(_filesPath.value)) }
+
+    private fun onFilesCapture(text: String, timedOut: Boolean) {
+        _filesBusy.value = false
+        if (timedOut) {
+            _fileListing.value = com.hardwareone.console.ble.FileListing(
+                false, 0, emptyList(),
+                "No reply — the file browser needs the Secure Channel and an admin login.",
+            )
+            return
+        }
+        _fileListing.value = com.hardwareone.console.ble.FileListing.parse(text)
+            ?: com.hardwareone.console.ble.FileListing(false, 0, emptyList(), "Unexpected reply.")
+    }
+
+    private fun onFileStatsCapture(text: String) {
+        com.hardwareone.console.ble.FileStats.parse(text)?.let { _fileStats.value = it }
+    }
+
+    // Read — pull bounded windows until eof, then assemble (for viewing or downloading).
+    fun openFile(name: String) {
+        if (connectionState.value !is ConnectionState.Ready || _filesBusy.value) return
+        readForDownload = false
+        startRead(name)
+    }
+
+    /** Read a file off the device for saving to the phone (UI then shows a "Save as" picker). */
+    fun downloadFile(name: String) {
+        if (connectionState.value !is ConnectionState.Ready || _filesBusy.value) return
+        readForDownload = true
+        _fileTransfer.value = com.hardwareone.console.ble.FileTransfer(name, 0, 0, upload = false)
+        startRead(name)
+    }
+
+    private fun startRead(name: String) {
+        readPath = joinPath(_filesPath.value, name)
+        readOffset = 0L
+        readBuf.reset()
+        fileOpCancelled = false
+        _filesBusy.value = true
+        ble.sendCaptured("fileread $readPath 0 $readWindow", TAG_FILE_READ)
+    }
+
+    fun closeFileViewer() { _fileViewer.value = null }
+    fun clearDownload() { _downloadReady.value = null }
+
+    /** Stop an in-flight upload or download. Any in-flight reply is then ignored. */
+    fun cancelTransfer() {
+        fileOpCancelled = true
+        writeBytes = null
+        readForDownload = false
+        readBuf.reset()
+        _filesBusy.value = false
+        _fileTransfer.value = null
+        if (connectionState.value is ConnectionState.Ready) loadFiles(_filesPath.value) // a partial upload may have written
+    }
+
+    private fun failRead(msg: String) {
+        _filesBusy.value = false
+        if (readForDownload) _fileTransfer.value = _fileTransfer.value?.copy(finished = true, error = msg)
+        else reportError(msg)
+    }
+
+    private fun onFileReadCapture(text: String, timedOut: Boolean) {
+        if (fileOpCancelled) return
+        if (timedOut) { failRead("File read timed out."); return }
+        val r = com.hardwareone.console.ble.FileReadChunk.parse(text)
+            ?: run { failRead("Unexpected file-read reply."); return }
+        if (!r.success) { failRead("Read failed: ${r.error}"); return }
+        val bytes = if (r.enc == "b64") {
+            runCatching { android.util.Base64.decode(r.data, android.util.Base64.DEFAULT) }.getOrDefault(ByteArray(0))
+        } else {
+            r.data.toByteArray(Charsets.UTF_8)
+        }
+        readBuf.write(bytes)
+        readOffset += r.len
+        if (readForDownload) {
+            _fileTransfer.value = _fileTransfer.value?.copy(done = readOffset, total = r.size)
+        }
+        if (r.eof || r.len == 0) {
+            val raw = readBuf.toByteArray()
+            _filesBusy.value = false
+            if (readForDownload) {
+                _downloadReady.value = readPath.substringAfterLast('/') to raw
+                _fileTransfer.value = null // hand off to the save picker
+            } else {
+                val binary = raw.any { it == 0.toByte() }
+                _fileViewer.value = com.hardwareone.console.ble.FileViewerState(
+                    path = readPath,
+                    text = if (binary) "" else String(raw, Charsets.UTF_8),
+                    binary = binary,
+                    size = r.size,
+                )
+            }
+        } else {
+            ble.sendCaptured("fileread $readPath $readOffset $readWindow", TAG_FILE_READ)
+        }
+    }
+
+    // Write (upload) — sequential base64 chunks sized to one secure frame.
+    fun uploadFile(path: String, bytes: ByteArray) {
+        if (connectionState.value !is ConnectionState.Ready || _filesBusy.value) return
+        val name = path.substringAfterLast('/')
+        if (bytes.size > 256 * 1024) {
+            _fileTransfer.value = com.hardwareone.console.ble.FileTransfer(
+                name, 0, bytes.size.toLong(), finished = true,
+                error = "File too large for BLE (256 KB max) — use the web browser.",
+            )
+            return
+        }
+        if (bytes.isEmpty()) { createFile(path); return }
+        writePath = path
+        writeBytes = bytes
+        writeOffset = 0L
+        writeSentFinal = false
+        fileOpCancelled = false
+        _filesBusy.value = true
+        _fileTransfer.value = com.hardwareone.console.ble.FileTransfer(name, 0, bytes.size.toLong())
+        sendNextWriteChunk()
+    }
+
+    fun dismissTransfer() { _fileTransfer.value = null }
+
+    private fun chunkSizeFor(path: String): Int {
+        val cap = ble.secureCommandCapacity()
+        val overhead = "filewrite ".length + path.length + 1 + 14 + 1 + " final".length + 4
+        val b64budget = (cap - overhead).coerceAtLeast(40)
+        return ((b64budget / 4) * 3).coerceAtLeast(48) // raw bytes whose base64 fits the budget
+    }
+
+    private fun sendNextWriteChunk() {
+        val bytes = writeBytes ?: return
+        val off = writeOffset.toInt().coerceIn(0, bytes.size)
+        val end = minOf(off + chunkSizeFor(writePath), bytes.size)
+        val chunk = bytes.copyOfRange(off, end)
+        writeSentFinal = end >= bytes.size
+        val b64 = android.util.Base64.encodeToString(chunk, android.util.Base64.NO_WRAP)
+        val cmd = "filewrite $writePath $off $b64" + if (writeSentFinal) " final" else ""
+        ble.sendCaptured(cmd, TAG_FILE_WRITE)
+    }
+
+    private fun onFileWriteCapture(text: String, timedOut: Boolean) {
+        if (fileOpCancelled) return
+        if (timedOut) { failWrite("Upload timed out."); return }
+        val r = com.hardwareone.console.ble.FileWriteResult.parse(text)
+            ?: run { failWrite("Bad write reply."); return }
+        if (!r.success) {
+            if (r.error?.startsWith("Offset mismatch") == true) {
+                writeOffset = r.size // resync to the device's actual size and resume
+                sendNextWriteChunk()
+            } else {
+                failWrite(r.error ?: "Write failed.")
+            }
+            return
+        }
+        writeOffset = r.size
+        _fileTransfer.value = _fileTransfer.value?.copy(done = r.size)
+        if (writeSentFinal || r.final) {
+            _fileTransfer.value = _fileTransfer.value?.copy(finished = true)
+            writeBytes = null
+            _filesBusy.value = false
+            loadFiles(_filesPath.value) // refresh listing + stats
+        } else {
+            sendNextWriteChunk()
+        }
+    }
+
+    private fun failWrite(msg: String) {
+        _fileTransfer.value = _fileTransfer.value?.copy(finished = true, error = msg)
+        writeBytes = null
+        _filesBusy.value = false
+    }
+
+    // Text-reply verbs (reply lands on the console; reload to reflect the result).
+    fun makeDir(name: String) = fileVerb("mkdir ${joinPath(_filesPath.value, name)}")
+    fun createFile(pathOrName: String) = fileVerb(
+        "filecreate " + if (pathOrName.startsWith("/")) pathOrName else joinPath(_filesPath.value, pathOrName),
+    )
+    fun renameFile(oldName: String, newName: String) =
+        fileVerb("filerename ${joinPath(_filesPath.value, oldName)} $newName")
+    fun deleteFile(name: String) = fileVerb("filedelete ${joinPath(_filesPath.value, name)} confirm")
+
+    private fun fileVerb(command: String) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCommand(command)
+        viewModelScope.launch { kotlinx.coroutines.delay(500); loadFiles(_filesPath.value) }
     }
 
     private fun onControlsCapture(moduleId: String, text: String) {
@@ -805,5 +1054,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_LLM_GEN = "llmgen"
         const val TAG_LLM_RESULT = "llmresult"
         const val TAG_LLM_CMD = "llmcmd" // one-shot load/unload/stop/clear; reply captured & ignored
+        const val TAG_FILES = "files"
+        const val TAG_FILE_STATS = "filestats"
+        const val TAG_FILE_READ = "fileread"
+        const val TAG_FILE_WRITE = "filewrite"
     }
 }

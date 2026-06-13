@@ -37,6 +37,7 @@ import com.hardwareone.console.ui.AppPage
 import com.hardwareone.console.ui.ConsoleScreen
 import com.hardwareone.console.ui.ConsoleViewModel
 import com.hardwareone.console.ui.DevicesScreen
+import com.hardwareone.console.ui.FilesScreen
 import com.hardwareone.console.ui.LlmChatScreen
 import com.hardwareone.console.ui.LoginDialog
 import com.hardwareone.console.ui.LogViewerScreen
@@ -76,6 +77,7 @@ class MainActivity : FragmentActivity() {
         data object Status : Screen
         data object Sensors : Screen
         data object LlmChat : Screen
+        data object Files : Screen
         data object SavedLogs : Screen
         data class Viewer(val fileName: String, val title: String, val text: String) : Screen
     }
@@ -153,6 +155,7 @@ class MainActivity : FragmentActivity() {
                             onOpenStatus = { navTo(Screen.Status) },
                             onOpenSensors = { navTo(Screen.Sensors) },
                             onOpenLlm = { navTo(Screen.LlmChat) },
+                            onOpenFiles = { vm.loadFiles("/"); navTo(Screen.Files) },
                             onLoginButton = ::onLoginButtonClicked,
                         )
                         AppPage.DEVICES -> {
@@ -307,6 +310,8 @@ class MainActivity : FragmentActivity() {
                             onBack = { navBack() },
                         )
                     }
+
+                    Screen.Files -> FilesScreen(vm = vm, onBack = { navBack() })
 
                     Screen.SavedLogs -> {
                         val savedLogs by vm.savedLogs.collectAsState()
