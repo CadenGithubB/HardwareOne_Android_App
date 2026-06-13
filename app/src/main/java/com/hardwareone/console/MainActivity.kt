@@ -301,6 +301,8 @@ class MainActivity : FragmentActivity() {
                             onLoadModel = vm::loadLlmModel,
                             onUnload = vm::unloadLlmModel,
                             onSend = vm::sendLlmPrompt,
+                            onDo = vm::sendLlmDo,
+                            onRunCommand = vm::runDoCommand,
                             onStop = vm::stopLlmGeneration,
                             onRetry = vm::retryLlm,
                             onClear = vm::clearLlmChat,

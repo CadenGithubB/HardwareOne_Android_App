@@ -74,6 +74,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     private var llmOffset = 0
     private var llmActive = false // a generation is in progress (drives the result poll loop)
+    private var llmDoTurn = false // current turn is a `Do:` command-suggestion turn
 
     // I²C device list (`devices json`), lazily loaded when the user expands the I²C card.
     // null = not loaded yet; empty list = loaded, none present.
@@ -446,10 +447,39 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         if (connectionState.value !is ConnectionState.Ready) return
         _llmMessages.value = _llmMessages.value +
             ChatMessage(ChatMessage.Role.USER, p) + ChatMessage(ChatMessage.Role.ASSISTANT, "")
+        llmDoTurn = false
+        startLlmTurn("Q: $p\nA:") // firmware frames nothing — supply Q:/A: ourselves (web parity)
+    }
+
+    /**
+     * `Do:` turn — ask the LLM to produce a CLI command for an intent (the trailing `Do:` token
+     * puts the firmware in command-suggestion mode). The reply is post-processed into a single
+     * command and rendered with a Run button rather than as prose.
+     */
+    fun sendLlmDo(intent: String) {
+        val p = intent.trim()
+        if (p.isEmpty() || llmActive) return
+        if (connectionState.value !is ConnectionState.Ready) return
+        _llmMessages.value = _llmMessages.value +
+            ChatMessage(ChatMessage.Role.USER, "Do: $p") + ChatMessage(ChatMessage.Role.ASSISTANT, "")
+        llmDoTurn = true
+        startLlmTurn("Q: $p\nDo:") // newline is normalized to a space over BLE; trailing Do: matters
+    }
+
+    private fun startLlmTurn(framedPrompt: String) {
         llmOffset = 0
         llmActive = true
         _llmGenerating.value = true
-        ble.sendCaptured("llmgenerate json $p", TAG_LLM_GEN)
+        ble.sendCaptured("llmgenerate json $framedPrompt", TAG_LLM_GEN)
+    }
+
+    /** Run a `Do:`-suggested command on the device (output lands in the Console log). */
+    fun runDoCommand(command: String) {
+        val c = command.trim()
+        if (c.isEmpty() || connectionState.value !is ConnectionState.Ready) return
+        ble.sendCommand(c)
+        _llmMessages.value = _llmMessages.value +
+            ChatMessage(ChatMessage.Role.ASSISTANT, "▶ ran \"$c\" — output in Console")
     }
 
     private fun onLlmGenStart(text: String, timedOut: Boolean) {
@@ -491,9 +521,38 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         llmOffset = minOf(llmOffset + 512, r.len)
         when {
             llmOffset < r.len -> pollLlmResult() // more is buffered — drain it now, no delay
-            r.done -> { llmActive = false; _llmGenerating.value = false }
+            r.done -> {
+                llmActive = false
+                _llmGenerating.value = false
+                if (llmDoTurn) finishDoTurn()
+            }
             else -> viewModelScope.launch { kotlinx.coroutines.delay(350); pollLlmResult() }
         }
+    }
+
+    /** Turn the raw `Do:` reply into a single runnable command and mark the bubble as a command. */
+    private fun finishDoTurn() {
+        val msgs = _llmMessages.value.toMutableList()
+        val i = msgs.indexOfLast { it.role == ChatMessage.Role.ASSISTANT }
+        if (i < 0) return
+        val cmd = extractCommand(msgs[i].text)
+        msgs[i] = if (cmd.isEmpty()) {
+            msgs[i].copy(text = "(no command suggested)")
+        } else {
+            msgs[i].copy(text = cmd, command = true)
+        }
+        _llmMessages.value = msgs
+    }
+
+    /**
+     * Reduce the model's `Do:` output to a bare command — drop anything from the first sentence
+     * punctuation and strip trailing explanation words. Mirrors the firmware web UI's extraction.
+     */
+    private fun extractCommand(raw: String): String {
+        var c = raw.trim().takeWhile { it !in ".,;!?" }.trim()
+        val stop = "to|for|and|the|is|it|that|this|which|will|can|shows|displays|checks|reads"
+        c = c.replace(Regex("\\s+($stop)\\b.*", RegexOption.IGNORE_CASE), "")
+        return c.trim()
     }
 
     private fun appendAssistant(chunk: String) {

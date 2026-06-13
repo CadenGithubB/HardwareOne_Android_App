@@ -68,7 +68,11 @@ data class LlmResult(val text: String, val done: Boolean, val len: Int) {
     }
 }
 
-/** One chat message in the LLM conversation. */
-data class ChatMessage(val role: Role, val text: String) {
+/**
+ * One chat message in the LLM conversation.
+ * `command = true` marks an assistant message as a runnable CLI suggestion (the result of a
+ * `Do:` turn) — the UI renders it as a command with a Run button instead of prose.
+ */
+data class ChatMessage(val role: Role, val text: String, val command: Boolean = false) {
     enum class Role { USER, ASSISTANT }
 }
