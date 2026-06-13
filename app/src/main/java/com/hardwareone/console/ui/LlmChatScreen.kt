@@ -74,6 +74,8 @@ private val CardShape = RoundedCornerShape(14.dp)
 fun LlmChatScreen(
     status: LlmStatus?,
     models: List<String>,
+    loadingModel: String?,
+    unloading: Boolean,
     messages: List<ChatMessage>,
     generating: Boolean,
     onLoadModel: (String) -> Unit,
@@ -138,7 +140,7 @@ fun LlmChatScreen(
                     }
                 }
 
-                ModelBar(status, models, onLoadModel, onUnload)
+                ModelBar(status, models, loadingModel, unloading, onLoadModel, onUnload)
 
                 // Conversation.
                 val listState = rememberLazyListState()
@@ -221,11 +223,14 @@ fun LlmChatScreen(
 private fun ModelBar(
     status: LlmStatus?,
     models: List<String>,
+    loadingModel: String?,
+    unloading: Boolean,
     onLoadModel: (String) -> Unit,
     onUnload: () -> Unit,
 ) {
     val hw = LocalHwColors.current
     var menuOpen by remember { mutableStateOf(false) }
+    val busy = loadingModel != null || unloading || status?.loading == true
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -238,19 +243,25 @@ private fun ModelBar(
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = status?.model?.takeIf { it.isNotEmpty() && status.loaded } ?: "No model loaded",
+                text = loadingModel
+                    ?: status?.model?.takeIf { it.isNotEmpty() && status.loaded }
+                    ?: "No model loaded",
                 color = hw.onGradient,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = llmStateLine(status),
+                text = when {
+                    loadingModel != null -> "loading…"
+                    unloading -> "unloading…"
+                    else -> llmStateLine(status)
+                },
                 color = if (status?.errored == true) hw.danger else hw.muted,
                 style = MaterialTheme.typography.labelSmall,
             )
         }
-        if (status?.loading == true) {
+        if (busy) {
             CircularProgressIndicator(Modifier.size(18.dp), color = hw.onGradient, strokeWidth = 2.dp)
         }
         Box {

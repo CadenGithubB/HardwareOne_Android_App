@@ -214,6 +214,8 @@ class MainActivity : FragmentActivity() {
                         val i2cDevices by vm.i2cDevices.collectAsState()
                         val i2cLoading by vm.i2cLoading.collectAsState()
                         val battery by vm.battery.collectAsState()
+                        val deviceInfo by vm.deviceInfo.collectAsState()
+                        val bleTraffic by vm.bleTraffic.collectAsState()
                         // Poll while the page is open AND the app is in the foreground
                         // (request/response — no push/subscribe). repeatOnLifecycle cancels the
                         // loop on pause/screen-lock/background and restarts it on resume, so a
@@ -239,6 +241,8 @@ class MainActivity : FragmentActivity() {
                             i2cLoading = i2cLoading,
                             onLoadI2cDevices = vm::loadI2cDevices,
                             battery = battery,
+                            deviceInfo = deviceInfo,
+                            traffic = bleTraffic,
                             onRefresh = vm::refreshStatus,
                             onBack = { vm.clearStatus(); navBack() },
                         )
@@ -280,6 +284,8 @@ class MainActivity : FragmentActivity() {
                     Screen.LlmChat -> {
                         val llmStatus by vm.llmStatus.collectAsState()
                         val llmModels by vm.llmModels.collectAsState()
+                        val llmLoadingModel by vm.llmLoadingModel.collectAsState()
+                        val llmUnloading by vm.llmUnloading.collectAsState()
                         val llmMessages by vm.llmMessages.collectAsState()
                         val llmGenerating by vm.llmGenerating.collectAsState()
                         LaunchedEffect(Unit) {
@@ -297,6 +303,8 @@ class MainActivity : FragmentActivity() {
                         LlmChatScreen(
                             status = llmStatus,
                             models = llmModels,
+                            loadingModel = llmLoadingModel,
+                            unloading = llmUnloading,
                             messages = llmMessages,
                             generating = llmGenerating,
                             onLoadModel = vm::loadLlmModel,

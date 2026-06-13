@@ -122,7 +122,17 @@ class BleManager(context: Context) {
     private var lastDevice: BluetoothDevice? = null
     private var currentName: String = "HardwareOne"
     private var negotiatedMtu: Int = 23
+
+    // Per-session raw byte counters (reset on each connect).
+    private val _traffic = MutableStateFlow(BleTraffic(0, 0))
+    val traffic: StateFlow<BleTraffic> = _traffic.asStateFlow()
+    private fun addRx(n: Int) { _traffic.value = _traffic.value.let { it.copy(rxBytes = it.rxBytes + n) } }
+    private fun addTx(n: Int) { _traffic.value = _traffic.value.let { it.copy(txBytes = it.txBytes + n) } }
     private var userInitiatedDisconnect = false
+    // Auto-reconnect: only after a session was established, only on an *unexpected* drop, bounded.
+    private var sessionEstablished = false
+    private var autoReconnectAttempt = 0
+    private val autoReconnectRunnable = Runnable { lastDevice?.let { doConnect(it) } }
 
     /** Unregister/teardown. Call from ViewModel.onCleared(). */
     fun release() {
@@ -202,6 +212,16 @@ class BleManager(context: Context) {
     }
 
     fun connect(device: BluetoothDevice) {
+        // A fresh user-initiated connect: reset the auto-reconnect budget and cancel any pending
+        // retry. sessionEstablished stays false until we actually reach Ready, so an initial
+        // connect that fails does NOT auto-retry.
+        autoReconnectAttempt = 0
+        sessionEstablished = false
+        handler.removeCallbacks(autoReconnectRunnable)
+        doConnect(device)
+    }
+
+    private fun doConnect(device: BluetoothDevice) {
         if (!hasConnectPermission()) {
             emitError("BLUETOOTH_CONNECT permission not granted.")
             return
@@ -209,6 +229,7 @@ class BleManager(context: Context) {
         stopScan()
         closeGatt()
 
+        _traffic.value = BleTraffic(0, 0)
         lastDevice = device
         currentName = runCatching { device.name }.getOrNull() ?: "HardwareOne"
         userInitiatedDisconnect = false
@@ -231,6 +252,9 @@ class BleManager(context: Context) {
 
     fun disconnect() {
         userInitiatedDisconnect = true
+        sessionEstablished = false
+        autoReconnectAttempt = 0
+        handler.removeCallbacks(autoReconnectRunnable)
         val g = gatt
         if (g != null && hasConnectPermission()) {
             emitInfo("Disconnecting…")
@@ -245,10 +269,7 @@ class BleManager(context: Context) {
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                closeGatt()
-                _authenticated.value = false
-                _state.value = ConnectionState.Failed("Connection error (status $status).")
-                emitError("Connection error (status $status).")
+                onLinkLost("Connection error (status $status).")
                 return
             }
             when (newState) {
@@ -259,15 +280,13 @@ class BleManager(context: Context) {
                     g.discoverServices()
                 }
                 BluetoothGatt.STATE_DISCONNECTED -> {
-                    val wasIntentional = userInitiatedDisconnect
-                    closeGatt()
-                    _authenticated.value = false
-                    if (wasIntentional) {
+                    if (userInitiatedDisconnect) {
+                        closeGatt()
+                        _authenticated.value = false
                         _state.value = ConnectionState.Disconnected
                         emitInfo("Disconnected.")
                     } else {
-                        _state.value = ConnectionState.Failed("Device disconnected.")
-                        emitError("Device disconnected.")
+                        onLinkLost("Device disconnected.")
                     }
                 }
             }
@@ -348,7 +367,31 @@ class BleManager(context: Context) {
         writeDescriptorCompat(g, cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
     }
 
+    // An unexpected link loss (GATT error or device-initiated disconnect). Auto-reconnect only if
+    // we had a working session, the user didn't ask to disconnect, and we're under the retry cap.
+    // Each retry re-runs the full secure handshake (fresh ephemeral keys, same stored PSK) and
+    // leaves login gated exactly as a fresh connect — so it's security-neutral.
+    private fun onLinkLost(reason: String) {
+        closeGatt()
+        _authenticated.value = false
+        val canRetry = sessionEstablished && !userInitiatedDisconnect &&
+            autoReconnectAttempt < MAX_AUTO_RECONNECT && lastDevice != null && hasConnectPermission()
+        if (canRetry) {
+            autoReconnectAttempt++
+            val delay = AUTO_RECONNECT_BASE_MS shl (autoReconnectAttempt - 1) // 1.5s, 3s, 6s
+            _state.value = ConnectionState.Connecting(currentName)
+            emitInfo("$reason Reconnecting (attempt $autoReconnectAttempt/$MAX_AUTO_RECONNECT)…")
+            handler.postDelayed(autoReconnectRunnable, delay)
+        } else {
+            autoReconnectAttempt = 0
+            _state.value = ConnectionState.Failed(reason)
+            emitError(reason)
+        }
+    }
+
     private fun becomeReady(secure: Boolean) {
+        sessionEstablished = true
+        autoReconnectAttempt = 0
         _deviceInfo.value = _deviceInfo.value?.copy(mtu = negotiatedMtu, secure = secure)
         _state.value = ConnectionState.Ready(currentName, negotiatedMtu)
         if (secure) emitInfo("Secure channel established. Log in with:  login <username> <password>")
@@ -451,6 +494,7 @@ class BleManager(context: Context) {
 
     private fun handleNotification(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
         if (characteristic.uuid != BleConstants.RESPONSE_CHAR) return
+        addRx(value.size)
         onAnyReply()
         val ch = channel
         if (ch == null) {
@@ -666,7 +710,10 @@ class BleManager(context: Context) {
         val op = opQueue.removeFirstOrNull() ?: return
         opInFlight = true
         val ok = when (op) {
-            is GattOp.WriteRequest -> requestChar?.let { writeCharacteristicCompat(g, it, op.bytes) } ?: false
+            is GattOp.WriteRequest -> requestChar?.let {
+                addTx(op.bytes.size)
+                writeCharacteristicCompat(g, it, op.bytes)
+            } ?: false
             is GattOp.ReadChar -> g.readCharacteristic(op.characteristic)
         }
         if (!ok) {
@@ -887,6 +934,8 @@ class BleManager(context: Context) {
         private const val CAPTURE_TIMEOUT_MS = 5_000L
         private const val COMMAND_SILENCE_MS = 3_500L
         private const val IDLE_DISCONNECT_MS = 30 * 60 * 1000L // power-safety: drop an idle link
+        private const val MAX_AUTO_RECONNECT = 3
+        private const val AUTO_RECONNECT_BASE_MS = 1500L
 
         fun requiredPermissions(): Array<String> =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

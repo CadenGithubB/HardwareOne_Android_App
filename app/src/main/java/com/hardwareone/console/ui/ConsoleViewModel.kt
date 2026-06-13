@@ -35,6 +35,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     val connectionState: StateFlow<ConnectionState> = ble.state
     val scanResults: StateFlow<List<DiscoveredDevice>> = ble.scanResults
     val authenticated: StateFlow<Boolean> = ble.authenticated
+    val bleTraffic: StateFlow<com.hardwareone.console.ble.BleTraffic> = ble.traffic
 
     /** Username of the active session (shown in the status chip), or null when not logged in. */
     private val _currentUser = MutableStateFlow<String?>(null)
@@ -63,6 +64,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private val _llmStatus = MutableStateFlow<com.hardwareone.console.ble.LlmStatus?>(null)
     val llmStatus: StateFlow<com.hardwareone.console.ble.LlmStatus?> = _llmStatus.asStateFlow()
 
+    // Optimistic load/unload feedback — `llmload` can block silently for seconds, so we show the
+    // transition immediately on tap and clear it when the device reports a settled state.
+    private val _llmLoadingModel = MutableStateFlow<String?>(null)
+    val llmLoadingModel: StateFlow<String?> = _llmLoadingModel.asStateFlow()
+    private val _llmUnloading = MutableStateFlow(false)
+    val llmUnloading: StateFlow<Boolean> = _llmUnloading.asStateFlow()
+
     private val _llmModels = MutableStateFlow<List<String>>(emptyList())
     val llmModels: StateFlow<List<String>> = _llmModels.asStateFlow()
 
@@ -71,6 +79,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _llmGenerating = MutableStateFlow(false)
     val llmGenerating: StateFlow<Boolean> = _llmGenerating.asStateFlow()
+
+    // Recent console commands (newest first, deduped) for the input-bar history recall.
+    private val _commandHistory = MutableStateFlow<List<String>>(emptyList())
+    val commandHistory: StateFlow<List<String>> = _commandHistory.asStateFlow()
 
     private var llmOffset = 0
     private var llmActive = false // a generation is in progress (drives the result poll loop)
@@ -199,7 +211,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_SENSORS -> onSensorsCapture(capture.text, capture.timedOut)
                         tag == TAG_CONTROL_MODULES -> onControlModulesCapture(capture.text)
                         tag == TAG_BATTERY -> onBatteryCapture(capture.text, capture.timedOut)
-                        tag == TAG_LLM_STATUS -> com.hardwareone.console.ble.LlmStatus.parse(capture.text)?.let { _llmStatus.value = it }
+                        tag == TAG_LLM_STATUS -> onLlmStatusCapture(capture.text)
                         tag == TAG_LLM_MODELS -> com.hardwareone.console.ble.LlmStatus.parseModels(capture.text)?.let { _llmModels.value = it }
                         tag == TAG_LLM_GEN -> onLlmGenStart(capture.text, capture.timedOut)
                         tag == TAG_LLM_RESULT -> onLlmResult(capture.text, capture.timedOut)
@@ -647,13 +659,23 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     // would stall the whole queue for 5 s. State is read back via the status re-poll. Any JSON
     // reply that gets claimed by an in-flight capture is tolerated by the robust collector.
     fun loadLlmModel(name: String) {
+        _llmLoadingModel.value = name
+        _llmUnloading.value = false
         ble.sendCommand("llmload $name")
         viewModelScope.launch { kotlinx.coroutines.delay(800); refreshLlmStatus() }
+        // Safety: never let the "loading…" UI stick if a settled status never arrives.
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(45_000)
+            if (_llmLoadingModel.value == name) _llmLoadingModel.value = null
+        }
     }
 
     fun unloadLlmModel() {
+        _llmUnloading.value = true
+        _llmLoadingModel.value = null
         ble.sendCommand("llmunload")
         viewModelScope.launch { kotlinx.coroutines.delay(400); refreshLlmStatus() }
+        viewModelScope.launch { kotlinx.coroutines.delay(15_000); _llmUnloading.value = false }
     }
 
     fun stopLlmGeneration() {
@@ -729,6 +751,17 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         ble.sendCommand(c)
         _llmMessages.value = _llmMessages.value +
             ChatMessage(ChatMessage.Role.ASSISTANT, "▶ ran \"$c\" — output in Console")
+    }
+
+    private fun onLlmStatusCapture(text: String) {
+        val s = com.hardwareone.console.ble.LlmStatus.parse(text) ?: return
+        _llmStatus.value = s
+        // Clear the optimistic load once the device confirms the requested model is ready (or errored).
+        val loading = _llmLoadingModel.value
+        if (loading != null && (s.errored || (s.ready && s.model.equals(loading, ignoreCase = true)))) {
+            _llmLoadingModel.value = null
+        }
+        if (_llmUnloading.value && !s.loaded) _llmUnloading.value = false
     }
 
     private fun onLlmGenStart(text: String, timedOut: Boolean) {
@@ -845,6 +878,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         // Capture the username from a typed `login <user> <pass>` so the status chip can show it.
         val parts = command.split(Regex("\\s+"))
         if (parts.size >= 3 && parts[0].equals("login", ignoreCase = true)) pendingUser = parts[1]
+        // Recall history — never store a `login …` line (it carries the password).
+        if (!parts[0].equals("login", ignoreCase = true)) {
+            _commandHistory.value = (listOf(command) + _commandHistory.value.filter { it != command }).take(20)
+        }
         append(LogEntry("> ${maskIfLogin(command)}", LogEntry.Kind.OUTGOING))
         ble.sendCommand(command)
     }

@@ -136,9 +136,10 @@ fun FilesScreen(vm: ConsoleViewModel, onBack: () -> Unit) {
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f).padding(start = 4.dp),
                     )
-                    if (busy) Spinner()
-                    IconButton(onClick = { vm.loadFiles(path) }) {
-                        Icon(painterResource(R.drawable.ic_refresh), "Refresh", tint = hw.onGradient)
+                    // While loading, the spinner replaces the refresh icon (same slot).
+                    IconButton(onClick = { vm.loadFiles(path) }, enabled = !busy) {
+                        if (busy) Spinner()
+                        else Icon(painterResource(R.drawable.ic_refresh), "Refresh", tint = hw.onGradient)
                     }
                 }
 

@@ -59,6 +59,8 @@ fun StatusScreen(
     i2cLoading: Boolean,
     onLoadI2cDevices: () -> Unit,
     battery: BatteryInfo?,
+    deviceInfo: com.hardwareone.console.ble.DeviceInfo?,
+    traffic: com.hardwareone.console.ble.BleTraffic,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -126,7 +128,7 @@ fun StatusScreen(
                             modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            StatusBody(status, error, i2cDevices, i2cLoading, onLoadI2cDevices, battery)
+                            StatusBody(status, error, i2cDevices, i2cLoading, onLoadI2cDevices, battery, deviceInfo, traffic)
                             Spacer(Modifier.height(8.dp))
                         }
                         // Couldn't load anything yet — surface the error.
@@ -163,6 +165,8 @@ private fun StatusBody(
     i2cLoading: Boolean,
     onLoadI2cDevices: () -> Unit,
     battery: BatteryInfo?,
+    deviceInfo: com.hardwareone.console.ble.DeviceInfo?,
+    traffic: com.hardwareone.console.ble.BleTraffic,
 ) {
     // A non-fatal error while we still have a previous snapshot (e.g. a transient OOM).
     if (staleError != null) Banner(staleError)
@@ -172,6 +176,17 @@ private fun StatusBody(
         InfoRow("Board", s.board.ifEmpty { "—" })
         InfoRow("Uptime", s.uptime.ifEmpty { "—" })
         InfoRow("Device time", s.systemTime.ifEmpty { "— (not synced)" })
+    }
+
+    // The app↔device BLE link (app-side: connection properties + this session's traffic).
+    deviceInfo?.let {
+        SectionCard("BLE link") {
+            InfoRow("Address", it.address)
+            if (it.mtu > 0) InfoRow("MTU", it.mtu.toString())
+            InfoRow("Secure", if (it.secure) "yes" else "no")
+            InfoRow("RX", bytesLabel(traffic.rxBytes))
+            InfoRow("TX", bytesLabel(traffic.txBytes))
+        }
     }
 
     // Battery card — only when real battery hardware is present.
@@ -470,3 +485,9 @@ private fun Banner(text: String) {
 }
 
 private fun yn(b: Boolean): String = if (b) "yes" else "no"
+
+private fun bytesLabel(n: Long): String = when {
+    n < 1024 -> "$n B"
+    n < 1024 * 1024 -> "%.1f KB".format(n / 1024.0)
+    else -> "%.1f MB".format(n / (1024.0 * 1024))
+}

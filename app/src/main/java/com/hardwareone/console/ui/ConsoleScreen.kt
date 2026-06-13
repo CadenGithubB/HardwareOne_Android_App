@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -28,6 +29,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -48,12 +51,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.hardwareone.console.R
 import com.hardwareone.console.ble.ConnectionState
 import com.hardwareone.console.ui.theme.HwColors
 import com.hardwareone.console.ui.theme.LocalHwColors
@@ -76,6 +81,7 @@ fun ConsoleScreen(
     val hw = LocalHwColors.current
     val state by vm.connectionState.collectAsState()
     val log by vm.log.collectAsState()
+    val commandHistory by vm.commandHistory.collectAsState()
     val authenticated by vm.authenticated.collectAsState()
     val currentUser by vm.currentUser.collectAsState()
 
@@ -92,7 +98,6 @@ fun ConsoleScreen(
             authenticated = authenticated,
             user = currentUser,
             onSelectPage = onSelectPage,
-            onReadStatus = vm::readStatus,
             onSyncClock = vm::syncClock,
             onOpenStatus = onOpenStatus,
             onOpenSensors = onOpenSensors,
@@ -110,6 +115,7 @@ fun ConsoleScreen(
             onValueChange = { input = it },
             enabled = ready,
             authenticated = authenticated,
+            history = commandHistory,
             onSend = { if (input.isNotBlank()) { vm.send(input); input = "" } },
             onLogin = onLoginButton,
         )
@@ -172,7 +178,6 @@ private fun Header(
     authenticated: Boolean,
     user: String?,
     onSelectPage: (AppPage) -> Unit,
-    onReadStatus: () -> Unit,
     onSyncClock: () -> Unit,
     onOpenStatus: () -> Unit,
     onOpenSensors: () -> Unit,
@@ -187,17 +192,17 @@ private fun Header(
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // Row 1: all controls (toggle, menus, settings).
+        // Row 1: all controls (toggle, menus, settings) — evenly distributed so the gaps
+        // between every control (and the edges) match instead of clustering left.
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             PageToggle(AppPage.CONSOLE, onSelectPage)
             ConsoleMenu(onSaveLog, onClear)
             DeviceMenu(
                 state = state,
-                onReadStatus = onReadStatus,
                 onSyncClock = onSyncClock,
                 onOpenStatus = onOpenStatus,
                 onOpenSensors = onOpenSensors,
@@ -205,7 +210,6 @@ private fun Header(
                 onOpenFiles = onOpenFiles,
                 onConnect = { onSelectPage(AppPage.DEVICES) },
             )
-            Spacer(Modifier.weight(1f))
             GearButton(onOpenSettings)
         }
         // Row 2: connection / login status, always on its own line.
@@ -245,7 +249,6 @@ private fun ConsoleMenu(onSaveLog: (() -> Unit)?, onClear: () -> Unit) {
 @Composable
 private fun DeviceMenu(
     state: ConnectionState,
-    onReadStatus: () -> Unit,
     onSyncClock: () -> Unit,
     onOpenStatus: () -> Unit,
     onOpenSensors: () -> Unit,
@@ -273,10 +276,6 @@ private fun DeviceMenu(
                 DropdownMenuItem(
                     text = { Text("Files") },
                     onClick = { expanded = false; onOpenFiles() },
-                )
-                DropdownMenuItem(
-                    text = { Text("Read status") },
-                    onClick = { expanded = false; onReadStatus() },
                 )
                 DropdownMenuItem(
                     text = { Text("Sync clock") },
@@ -311,6 +310,9 @@ private fun LogView(log: List<LogEntry>, modifier: Modifier = Modifier) {
     LaunchedEffect(log.size) {
         if (log.isNotEmpty()) listState.scrollToItem(log.size - 1)
     }
+    // Deliberately NOT inside a SelectionContainer: the console stays read-only on screen
+    // (FLAG_SECURE-protected). The one sanctioned plaintext egress is the gated decrypted-log
+    // export — copy-to-clipboard would be an uncontrolled second exit (visible to the IME).
     LazyColumn(
         state = listState,
         modifier = modifier
@@ -336,6 +338,7 @@ private fun InputBar(
     onValueChange: (String) -> Unit,
     enabled: Boolean,
     authenticated: Boolean,
+    history: List<String>,
     onSend: () -> Unit,
     onLogin: () -> Unit,
 ) {
@@ -357,6 +360,40 @@ private fun InputBar(
                 imeAction = ImeAction.Send,
             ),
             keyboardActions = KeyboardActions(onSend = { onSend() }),
+            trailingIcon = if (history.isEmpty()) null else {
+                {
+                    var menu by remember { mutableStateOf(false) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // A divider then a history glyph at the right edge, near SEND: "| ↑".
+                        Box(Modifier.width(2.dp).height(22.dp).background(hw.cardBorder))
+                        Box {
+                            IconButton(onClick = { menu = true }, modifier = Modifier.size(40.dp)) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_arrow_up),
+                                    contentDescription = "Command history",
+                                    tint = hw.onGradient,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                history.forEach { cmd ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                cmd,
+                                                fontFamily = FontFamily.Monospace,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        },
+                                        onClick = { menu = false; onValueChange(cmd) },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = hw.onGradient,
                 unfocusedTextColor = hw.onGradient,

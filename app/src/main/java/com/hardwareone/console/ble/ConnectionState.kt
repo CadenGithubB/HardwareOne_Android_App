@@ -53,3 +53,6 @@ data class BleMessage(val text: String, val kind: Kind) {
  * [text] is the raw reply body; [timedOut] is true when nothing came back in time.
  */
 data class Capture(val tag: String, val text: String, val timedOut: Boolean)
+
+/** Bytes transferred over the current BLE link this session (raw GATT payloads). */
+data class BleTraffic(val rxBytes: Long, val txBytes: Long)
