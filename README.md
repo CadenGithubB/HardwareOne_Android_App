@@ -222,7 +222,7 @@ When connected, **Device ▾** opens the device tools:
   buttons), like the web/G2 UI. See [docs/SENSORS_DESIGN.md](docs/SENSORS_DESIGN.md).
 - **LLM chat** — on-device LLM over BLE: pick/load a model, send a prompt, and watch the
   reply **stream token-by-token**; **Stop**, **Retry**, and **Clear** (which also resets the
-  device-side conversation). See [docs/BLE_LLM_INTEGRATION.md](docs/BLE_LLM_INTEGRATION.md).
+  device-side conversation).
 - **Files** — a file browser over BLE: list directories with storage usage, view text files,
   **upload** files from the phone (chunked, base64 over the secure channel), and create /
   rename / delete (each action gated by the firmware's per-entry permission bits). Requires
@@ -297,7 +297,6 @@ app/src/main/
 docs/SECURE_CHANNEL_V1.md         the secure-channel wire contract (app ↔ firmware)
 docs/DEVICE_STATUS.md             status-page data contract
 docs/SENSORS_DESIGN.md            sensors-page design + per-sensor actions
-docs/BLE_LLM_INTEGRATION.md       on-device-LLM-over-BLE command contract
 ```
 
 ---
