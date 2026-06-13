@@ -166,9 +166,12 @@ private fun ConnectionCard(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    BatteryGlyph(battery.percentage, battery.charging)
+                    // Battery is account-gated — the last-known value is stale until re-login, so
+                    // show a placeholder while connected-but-not-authenticated.
+                    val known = authenticated
+                    BatteryGlyph(if (known) battery.percentage else -1, known && battery.charging)
                     Text(
-                        text = if (battery.percentage in 0..100) "${battery.percentage}%" else "—",
+                        text = if (known && battery.percentage in 0..100) "${battery.percentage}%" else "—",
                         color = hw.onGradient,
                         style = MaterialTheme.typography.bodyMedium,
                     )

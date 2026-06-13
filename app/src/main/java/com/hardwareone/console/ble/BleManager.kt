@@ -354,6 +354,7 @@ class BleManager(context: Context) {
         if (secure) emitInfo("Secure channel established. Log in with:  login <username> <password>")
         else emitInfo("Ready. Log in with:  login <username> <password>")
         requestDeviceInfo()
+        noteActivity() // arm the idle-disconnect timer for this session
     }
 
     // --- Secure handshake -----------------------------------------------------------
@@ -676,6 +677,13 @@ class BleManager(context: Context) {
     }
 
     /** Send a free-text CLI command (encrypted as a DATA frame when the channel is up). */
+    /**
+     * Max plaintext bytes a single command may occupy in one secure frame. File-write base64
+     * chunks must be sized so the whole `filewrite …` line stays under this (no reassembly on
+     * the REQUEST side). Mirrors the cap enforced in [sendCommand].
+     */
+    fun secureCommandCapacity(): Int = (negotiatedMtu - 28).coerceIn(40, 480)
+
     fun sendCommand(command: String) = sendCommand(command, watch = true)
 
     /**
@@ -709,6 +717,7 @@ class BleManager(context: Context) {
             enqueue(GattOp.WriteRequest(bytes))
         }
         if (watch) armCommandWatchdog(command)
+        noteActivity() // a write (command or poll) keeps the session alive
     }
 
     // --- Silent-device watchdog -----------------------------------------------------
@@ -804,7 +813,31 @@ class BleManager(context: Context) {
 
     // --- Helpers --------------------------------------------------------------------
 
+    // --- Idle auto-disconnect -----------------------------------------------------------
+    //
+    // An open GATT link holds the radio on both ends indefinitely; lifecycle gating stops
+    // polling but not the connection itself. As a power-safety net, drop the link after
+    // [IDLE_DISCONNECT_MS] with no traffic. Every write — a user command or a live-page poll —
+    // resets the timer, so an actively-used session never trips it, while a backgrounded or
+    // forgotten-idle one (polling stopped → no writes) does. Reconnect with RECONNECT.
+    private val idleDisconnect = Runnable {
+        if (_state.value is ConnectionState.Ready) {
+            emitInfo(
+                "Disconnected after ${IDLE_DISCONNECT_MS / 60_000} min idle (Bluetooth power " +
+                    "saver). Tap RECONNECT to resume.",
+            )
+            disconnect()
+        }
+    }
+
+    private fun noteActivity() {
+        if (_state.value !is ConnectionState.Ready) return
+        handler.removeCallbacks(idleDisconnect)
+        handler.postDelayed(idleDisconnect, IDLE_DISCONNECT_MS)
+    }
+
     private fun closeGatt() {
+        handler.removeCallbacks(idleDisconnect)
         cancelHandshakeTimeout()
         awaitingPsk = false
         handler.removeCallbacks(pskWaitTimeout)
@@ -853,6 +886,7 @@ class BleManager(context: Context) {
         private const val CAPTURE_QUIET_MS = 80L
         private const val CAPTURE_TIMEOUT_MS = 5_000L
         private const val COMMAND_SILENCE_MS = 3_500L
+        private const val IDLE_DISCONNECT_MS = 30 * 60 * 1000L // power-safety: drop an idle link
 
         fun requiredPermissions(): Array<String> =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
