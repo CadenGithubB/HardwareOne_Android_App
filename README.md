@@ -1,11 +1,14 @@
 # HardwareOne Console (Android) — v1.9.0
 
-A **Google-free** Android app that scans for, connects to, and messages an **ESP32-S3
-"HardwareOne"** device over **Bluetooth LE** — a single-screen, terminal-style console.
-It speaks the device's plaintext CLI **and, optionally, an app-layer encrypted channel**
-(X25519 + ChaCha20-Poly1305) that makes the link confidential **without any BLE
-pairing/bonding**.
+A **Google-free** Android app that scans for, connects to, and controls an **ESP32-S3
+"HardwareOne"** device over **Bluetooth LE** — a terminal-style console plus purpose-built
+pages for device status, sensors, battery, and the on-device LLM. It speaks the device's
+plaintext CLI **and, optionally, an app-layer encrypted channel** (X25519 +
+ChaCha20-Poly1305) that makes the link confidential **without any BLE pairing/bonding**.
 
+- **More than a console:** a **Devices** page (scan / connect / battery) and a **Console**,
+  plus drill-in pages for **device status**, **sensors** (with a live gamepad visualizer),
+  **battery**, and **on-device LLM chat** (replies streamed token-by-token).
 - **No Firebase, no Play Services, no analytics, no Nearby/Fast Pair.** Only
   `android.bluetooth.*` plus FOSS libraries (AndroidX, BouncyCastle).
 - **No `INTERNET` permission.** The app cannot talk to the network at all.
@@ -183,22 +186,43 @@ characteristics as opaque binary:
 
 ---
 
-## 6. Using the console
+## 6. Using the app
 
-1. **SCAN** — finds devices advertising the Command service UUID (by UUID, not name).
-2. Tap a device to connect. The log shows each step (discover → MTU → subscribe →
-   [securing →] ready).
-3. **Log in** — the **LOGIN** button opens a dialog (password masked on screen and in the
-   log), or type `login <user> <pass>`. Optionally tick **Remember** to save the
-   credentials (biometric/PIN-gated, hardware-Keystore-encrypted) and auto-login next time.
-4. Type commands (e.g. `help`, `whoami`) and press **SEND** / the keyboard's send key.
-5. The header packs the controls into one row:
-   - the connection button — **SCAN / STOP / CANCEL / DISCONNECT**,
-   - **Console ▾** — *Save log* / *Clear log*,
-   - **Device ▾** — what's connected (name, address, MTU, secure y/n, firmware, model) plus
-     *Status page* (a polled health/connectivity view — see [docs/DEVICE_STATUS.md](docs/DEVICE_STATUS.md)),
-     *Read status*, *Sync clock*, or *Reconnect* when disconnected,
-   - **⚙** — Settings (appearance, credentials, logs, secure channel).
+The app opens on the **Devices** page. A header toggle flips between **Devices** and
+**Console**; both share the one connection.
+
+### Devices
+
+1. **SCAN** finds devices advertising the Command service UUID (by UUID, not name);
+   **RECONNECT** re-opens the last device.
+2. Tap a device to connect. The connection card shows each step (discover → MTU →
+   subscribe → [securing →] ready) and, once connected, the device's **battery**.
+3. **DISCONNECT** drops the link.
+
+### Console
+
+1. **Log in** — the **LOGIN** button opens a dialog (password masked on screen and in the
+   log), or type `login <user> <pass>`. Tick **Remember** to save the credentials
+   (biometric/PIN-gated, hardware-Keystore-encrypted) and auto-login next time.
+2. Type commands (e.g. `help`, `whoami`) and press **SEND** / the keyboard's send key.
+3. The header row packs the controls — the **Devices / Console** toggle, **Console ▾**
+   (*Save log* / *Clear log*), **Device ▾**, and **⚙** (Settings) — with the status line
+   (online as `<user>`, secure y/n) on the second row.
+
+### Device ▾ — drill-in pages
+
+When connected, **Device ▾** opens the device tools:
+
+- **Status page** — a polled health/connectivity view (firmware, IP, uptime, I²C device
+  list, LLM state, …) with a battery card; first load shows a spinner, then refreshes
+  silently. See [docs/DEVICE_STATUS.md](docs/DEVICE_STATUS.md).
+- **Sensors** — per-sensor cards from `sensors json`, per-sensor settings (`controls json`)
+  and documented actions; the gamepad renders a **live graphical visualizer** (joystick +
+  buttons), like the web/G2 UI. See [docs/SENSORS_DESIGN.md](docs/SENSORS_DESIGN.md).
+- **LLM chat** — on-device LLM over BLE: pick/load a model, send a prompt, and watch the
+  reply **stream token-by-token**; **Stop**, **Retry**, and **Clear** (which also resets the
+  device-side conversation). See [docs/BLE_LLM_INTEGRATION.md](docs/BLE_LLM_INTEGRATION.md).
+- **Read status**, **Sync clock**, or **Reconnect** when disconnected.
 
 ---
 
@@ -232,18 +256,31 @@ app/src/main/
 │   ├── MainActivity.kt          single Activity; permissions, BT-enable, biometric, nav
 │   ├── ble/
 │   │   ├── BleConstants.kt       UUIDs + limits
-│   │   ├── ConnectionState.kt    connection phases + DeviceInfo / DiscoveredDevice
-│   │   └── BleManager.kt         GATT state machine; secure-channel framing + reassembly
+│   │   ├── ConnectionState.kt    connection phases + DeviceInfo / DiscoveredDevice / Capture
+│   │   ├── BleManager.kt         GATT state machine; secure-channel framing; off-console capture
+│   │   ├── DeviceStatus.kt       `status json` model (connectivity, LLM, …)
+│   │   ├── I2cDevice.kt          `devices json` model
+│   │   ├── SensorSnapshot.kt     `sensors json` model
+│   │   ├── SensorControls.kt     `controls json` model
+│   │   ├── BatteryInfo.kt        `batterystatus json` model
+│   │   └── LlmModels.kt          LLM status / result / chat-message models
 │   ├── security/
 │   │   ├── SecureChannel.kt      X25519/HKDF/ChaCha20-Poly1305 handshake (BouncyCastle)
 │   │   ├── CredentialStore.kt    login password — auth-gated AES-GCM Keystore
 │   │   ├── SecretBox.kt          channel passphrase — non-auth AES-GCM Keystore (at rest)
 │   │   └── LogVault.kt           encrypted log files (RSA-wrapped AES-GCM; biometric to read)
 │   └── ui/
-│       ├── ConsoleViewModel.kt   flows → log; command echo, masking, store facades
+│       ├── ConsoleViewModel.kt   flows → pages; captures, command echo, masking, store facades
+│       ├── UiCommon.kt           page toggle + shared buttons / spinner / battery glyph / status
+│       ├── DevicesScreen.kt      pairing/selection page (scan, connect, battery)
 │       ├── ConsoleScreen.kt      Compose console (responsive + tabletop; Console/Device menus)
+│       ├── StatusScreen.kt       polled device-status page (+ battery card)
+│       ├── SensorsScreen.kt      per-sensor cards, settings, documented actions
+│       ├── SensorVisualizers.kt  live gamepad (joystick / buttons) visualizer
+│       ├── SensorActions.kt      per-sensor documented-action registry
+│       ├── LlmChatScreen.kt      on-device LLM chat (streamed replies, load/stop/retry/clear)
 │       ├── SettingsScreen.kt     appearance · credentials · logs · secure channel
-│       ├── SavedLogsScreen.kt    encrypted saved-log list
+│       ├── SavedLogsScreen.kt    encrypted saved-log list (+ storage info)
 │       ├── LogViewerScreen.kt    decrypted viewer + plaintext export
 │       ├── FoldPosture.kt        Jetpack WindowManager → fold posture
 │       ├── ThemePreference.kt    theme persistence
@@ -251,6 +288,9 @@ app/src/main/
 ├── res/  (+ res/values-night/)  adaptive icon, strings, day/night window themes
 └── test/ …/security/            SecureChannel unit tests + interop vectors
 docs/SECURE_CHANNEL_V1.md         the secure-channel wire contract (app ↔ firmware)
+docs/DEVICE_STATUS.md             status-page data contract
+docs/SENSORS_DESIGN.md            sensors-page design + per-sensor actions
+docs/BLE_LLM_INTEGRATION.md       on-device-LLM-over-BLE command contract
 ```
 
 ---
