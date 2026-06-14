@@ -306,7 +306,7 @@ private fun MenuButton(label: String, onClick: () -> Unit) {
         border = BorderStroke(1.dp, hw.cardBorder),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = hw.onGradient),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-    ) { Text("$label ▾") }
+    ) { OutlinedText("$label ▾", color = hw.onGradient) }
 }
 
 @Composable

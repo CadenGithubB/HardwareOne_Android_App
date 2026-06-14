@@ -18,6 +18,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -25,7 +26,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.hardwareone.console.R
@@ -55,17 +60,55 @@ fun PageToggle(active: AppPage, onSelect: (AppPage) -> Unit) {
 @Composable
 private fun PageToggleSegment(label: String, selected: Boolean, onClick: () -> Unit) {
     val hw = LocalHwColors.current
-    Text(
-        text = label,
-        color = if (selected) hw.accent else hw.onGradient,
-        style = MaterialTheme.typography.labelLarge,
-        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+    Box(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
             .background(if (selected) hw.onGradient else Color.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 6.dp),
-    )
+    ) {
+        if (selected) {
+            // Selected side has a white pill background → plain black text reads cleanly.
+            Text(
+                text = label,
+                color = Color.Black,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+        } else {
+            // Unselected sits on the gradient → white text with a black outline for readability.
+            OutlinedText(
+                text = label,
+                color = hw.onGradient,
+                style = MaterialTheme.typography.labelLarge,
+            )
+        }
+    }
+}
+
+/**
+ * Text with a thin black outline (a stroked copy behind the filled text) — improves readability
+ * of the header controls on the light gradient. Near-invisible on the dark theme, by design.
+ */
+@Composable
+internal fun OutlinedText(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    style: TextStyle = LocalTextStyle.current,
+    fontWeight: FontWeight? = null,
+    outline: Color = Color.Black,
+) {
+    val strokeWidth = with(LocalDensity.current) { 2.dp.toPx() }
+    Box(modifier) {
+        Text(
+            text = text,
+            color = outline,
+            fontWeight = fontWeight,
+            style = style.copy(drawStyle = Stroke(width = strokeWidth, join = StrokeJoin.Round)),
+        )
+        Text(text = text, color = color, fontWeight = fontWeight, style = style)
+    }
 }
 
 @Composable
@@ -92,7 +135,11 @@ internal fun PrimaryButton(onClick: () -> Unit, enabled: Boolean = true, text: S
             disabledContainerColor = hw.cardBg,
             disabledContentColor = hw.muted,
         ),
-    ) { Text(text) }
+    ) {
+        // Plain black text on the light button (not accent/"purple"). Disabled inherits the
+        // button's muted content colour.
+        Text(text, color = if (enabled) Color.Black else Color.Unspecified)
+    }
 }
 
 /** Frosted outlined button — secondary actions. */
