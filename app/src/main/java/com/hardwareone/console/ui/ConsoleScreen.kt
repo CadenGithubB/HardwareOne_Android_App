@@ -35,14 +35,18 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -59,6 +63,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hardwareone.console.R
+import kotlinx.coroutines.launch
 import com.hardwareone.console.ble.ConnectionState
 import com.hardwareone.console.ui.theme.HwColors
 import com.hardwareone.console.ui.theme.LocalHwColors
@@ -81,6 +86,7 @@ fun ConsoleScreen(
     val hw = LocalHwColors.current
     val state by vm.connectionState.collectAsState()
     val log by vm.log.collectAsState()
+    val logTotal by vm.logTotal.collectAsState()
     val commandHistory by vm.commandHistory.collectAsState()
     val authenticated by vm.authenticated.collectAsState()
     val currentUser by vm.currentUser.collectAsState()
@@ -108,7 +114,7 @@ fun ConsoleScreen(
             onOpenSettings = onOpenSettings,
         )
     }
-    val logView: @Composable (Modifier) -> Unit = { m -> LogView(log, m) }
+    val logView: @Composable (Modifier) -> Unit = { m -> LogView(log, logTotal, m) }
     val inputBar: @Composable () -> Unit = {
         InputBar(
             value = input,
@@ -304,30 +310,85 @@ private fun MenuButton(label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun LogView(log: List<LogEntry>, modifier: Modifier = Modifier) {
+private fun LogView(log: List<LogEntry>, logTotal: Long, modifier: Modifier = Modifier) {
     val hw = LocalHwColors.current
     val listState = rememberLazyListState()
-    LaunchedEffect(log.size) {
-        if (log.isNotEmpty()) listState.scrollToItem(log.size - 1)
+    val scope = rememberCoroutineScope()
+
+    val atBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()
+            last == null || last.index >= info.totalItemsCount - 1
+        }
     }
-    // Deliberately NOT inside a SelectionContainer: the console stays read-only on screen
-    // (FLAG_SECURE-protected). The one sanctioned plaintext egress is the gated decrypted-log
-    // export — copy-to-clipboard would be an uncontrolled second exit (visible to the IME).
-    LazyColumn(
-        state = listState,
-        modifier = modifier
-            .clip(CardShape)
-            .background(hw.terminalBg)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    ) {
-        items(log) { entry ->
-            Text(
-                text = entry.text,
-                color = colorFor(entry.kind, hw),
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(vertical = 1.dp),
-            )
+    // Scroll lock: when the user scrolls up, freeze a SNAPSHOT of the log so the buffer trimming
+    // (oldest lines dropping as new arrive) doesn't shift the text under them. New output keeps
+    // flowing into `log` behind the snapshot; returning to the bottom resumes live tailing.
+    var frozen by remember { mutableStateOf<List<LogEntry>?>(null) }
+    var frozenTotal by remember { mutableStateOf(0L) }
+    LaunchedEffect(atBottom) {
+        if (atBottom) frozen = null else { frozen = log; frozenTotal = logTotal }
+    }
+    val shown = frozen ?: log
+    // Key on the displayed list (not its size): once the log hits its cap the size stays constant
+    // while content changes, so a size-keyed effect would stop following.
+    LaunchedEffect(shown) {
+        if (atBottom && shown.isNotEmpty()) listState.scrollToItem(shown.lastIndex)
+    }
+
+    // Lines between the user's current view and the live tail: grows as new output arrives,
+    // shrinks as they scroll down — a live sense of position while scroll-locked.
+    val logTotalState = rememberUpdatedState(logTotal)
+    val linesBelow by remember {
+        derivedStateOf {
+            val snap = frozen ?: return@derivedStateOf 0L
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: snap.lastIndex
+            val belowInSnapshot = (snap.lastIndex - lastVisible).coerceAtLeast(0).toLong()
+            belowInSnapshot + (logTotalState.value - frozenTotal).coerceAtLeast(0)
+        }
+    }
+
+    // NOT inside a SelectionContainer: the console stays read-only on screen (FLAG_SECURE); the
+    // one sanctioned plaintext egress is the gated decrypted-log export.
+    Box(modifier) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CardShape)
+                .background(hw.terminalBg)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+            items(shown) { entry ->
+                Text(
+                    text = entry.text,
+                    color = colorFor(entry.kind, hw),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(vertical = 1.dp),
+                )
+            }
+        }
+        if (frozen != null) {
+            Surface(
+                onClick = {
+                    scope.launch {
+                        frozen = null
+                        if (log.isNotEmpty()) listState.scrollToItem(log.lastIndex)
+                    }
+                },
+                shape = RoundedCornerShape(50),
+                color = hw.accent,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
+            ) {
+                Text(
+                    text = if (linesBelow > 0) "↓ Jump to latest · $linesBelow below" else "↓ Jump to latest",
+                    color = hw.onGradient,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+            }
         }
     }
 }

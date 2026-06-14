@@ -172,6 +172,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         listOf(LogEntry("HardwareOne console — tap SCAN to begin.", LogEntry.Kind.INFO)),
     )
     val log: StateFlow<List<LogEntry>> = _log.asStateFlow()
+    // Monotonic count of all lines ever appended — lets the UI measure "new lines while paused"
+    // even though `log` is capped (its size stays constant at the cap).
+    private val _logTotal = MutableStateFlow(0L)
+    val logTotal: StateFlow<Long> = _logTotal.asStateFlow()
 
     val bluetoothSupported: Boolean get() = ble.isBluetoothSupported
     val bluetoothEnabled: Boolean get() = ble.isBluetoothEnabled
@@ -1042,6 +1046,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         // Keep the log bounded so very long sessions don't grow unbounded.
         val next = (_log.value + entry)
         _log.value = if (next.size > MAX_LOG_LINES) next.takeLast(MAX_LOG_LINES) else next
+        _logTotal.value = _logTotal.value + 1
     }
 
     // --- Secure channel (app-layer encryption) passphrase ------------------------------

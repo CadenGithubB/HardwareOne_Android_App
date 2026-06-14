@@ -2,7 +2,9 @@ package com.hardwareone.console.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +36,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,7 +52,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import com.hardwareone.console.BuildConfig
+import kotlinx.coroutines.delay
 import com.hardwareone.console.R
 import com.hardwareone.console.ui.theme.LocalHwColors
 
@@ -76,6 +81,9 @@ fun SettingsScreen(
     onBack: () -> Unit,
 ) {
     val hw = LocalHwColors.current
+    // Easter egg: 10 silent taps on the version line (no progress hints) reveals a hidden image.
+    var eggTaps by remember { mutableStateOf(0) }
+    var showEgg by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -176,8 +184,36 @@ fun SettingsScreen(
                         color = hw.muted,
                         style = MaterialTheme.typography.labelSmall,
                         textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null, // no ripple — keep it a secret
+                            ) {
+                                eggTaps++
+                                if (eggTaps >= 10) { eggTaps = 0; showEgg = true }
+                            }
+                            .padding(vertical = 8.dp),
                     )
+
+                    if (showEgg) {
+                        // Ignore dismissal taps for the first second so it can't be flicked away
+                        // the instant it appears.
+                        var dismissable by remember { mutableStateOf(false) }
+                        LaunchedEffect(Unit) { delay(1000); dismissable = true }
+                        Dialog(onDismissRequest = { if (dismissable) showEgg = false }) {
+                            Image(
+                                painter = painterResource(R.drawable.rainbowdb),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
+                                    ) { if (dismissable) showEgg = false },
+                            )
+                        }
+                    }
                 }
             }
         }
