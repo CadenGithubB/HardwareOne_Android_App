@@ -1,6 +1,5 @@
 package com.hardwareone.console.ui
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -9,7 +8,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
@@ -25,14 +23,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -75,12 +71,7 @@ fun ConsoleScreen(
     vm: ConsoleViewModel,
     widthSizeClass: WindowWidthSizeClass,
     foldPosture: FoldPosture,
-    onSelectPage: (AppPage) -> Unit,
-    onOpenSettings: () -> Unit,
-    onOpenStatus: () -> Unit,
-    onOpenSensors: () -> Unit,
-    onOpenLlm: () -> Unit,
-    onOpenFiles: () -> Unit,
+    nav: HeaderNav,
     onLoginButton: () -> Unit,
 ) {
     val hw = LocalHwColors.current
@@ -97,22 +88,8 @@ fun ConsoleScreen(
     val ready = state is ConnectionState.Ready
     val isCompact = widthSizeClass == WindowWidthSizeClass.Compact
 
-    val saveLog: (() -> Unit)? = if (vm.canSaveLogs) ({ vm.saveCurrentLog() }) else null
     val header: @Composable () -> Unit = {
-        Header(
-            state = state,
-            authenticated = authenticated,
-            user = currentUser,
-            onSelectPage = onSelectPage,
-            onSyncClock = vm::syncClock,
-            onOpenStatus = onOpenStatus,
-            onOpenSensors = onOpenSensors,
-            onOpenLlm = onOpenLlm,
-            onOpenFiles = onOpenFiles,
-            onClear = vm::clearLog,
-            onSaveLog = saveLog,
-            onOpenSettings = onOpenSettings,
-        )
+        Header(nav = nav, state = state, authenticated = authenticated, user = currentUser)
     }
     val logView: @Composable (Modifier) -> Unit = { m -> LogView(log, logTotal, m) }
     val inputBar: @Composable () -> Unit = {
@@ -180,44 +157,18 @@ fun ConsoleScreen(
 
 @Composable
 private fun Header(
+    nav: HeaderNav,
     state: ConnectionState,
     authenticated: Boolean,
     user: String?,
-    onSelectPage: (AppPage) -> Unit,
-    onSyncClock: () -> Unit,
-    onOpenStatus: () -> Unit,
-    onOpenSensors: () -> Unit,
-    onOpenLlm: () -> Unit,
-    onOpenFiles: () -> Unit,
-    onClear: () -> Unit,
-    onSaveLog: (() -> Unit)?,
-    onOpenSettings: () -> Unit,
 ) {
     val hw = LocalHwColors.current
     Column(
-        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // Row 1: all controls (toggle, menus, settings) — evenly distributed so the gaps
-        // between every control (and the edges) match instead of clustering left.
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            PageToggle(AppPage.CONSOLE, onSelectPage)
-            ConsoleMenu(onSaveLog, onClear)
-            DeviceMenu(
-                state = state,
-                onSyncClock = onSyncClock,
-                onOpenStatus = onOpenStatus,
-                onOpenSensors = onOpenSensors,
-                onOpenLlm = onOpenLlm,
-                onOpenFiles = onOpenFiles,
-                onConnect = { onSelectPage(AppPage.DEVICES) },
-            )
-            GearButton(onOpenSettings)
-        }
+        // Row 1: the switcher (now also the nav hub) + settings gear.
+        AppHeader(nav)
         // Row 2: connection / login status, always on its own line.
         Text(
             text = statusLabel(state, authenticated, user),
@@ -228,85 +179,6 @@ private fun Header(
             modifier = Modifier.fillMaxWidth().padding(start = 4.dp),
         )
     }
-}
-
-/** "Console ▾" menu: save / clear the log. */
-@Composable
-private fun ConsoleMenu(onSaveLog: (() -> Unit)?, onClear: () -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        MenuButton("Console") { expanded = true }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            if (onSaveLog != null) {
-                DropdownMenuItem(
-                    text = { Text("Save log") },
-                    onClick = { expanded = false; onSaveLog() },
-                )
-            }
-            DropdownMenuItem(
-                text = { Text("Clear log") },
-                onClick = { expanded = false; onClear() },
-            )
-        }
-    }
-}
-
-/** "Device ▾" menu: device actions when connected; otherwise jump to the Devices page. */
-@Composable
-private fun DeviceMenu(
-    state: ConnectionState,
-    onSyncClock: () -> Unit,
-    onOpenStatus: () -> Unit,
-    onOpenSensors: () -> Unit,
-    onOpenLlm: () -> Unit,
-    onOpenFiles: () -> Unit,
-    onConnect: () -> Unit,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        MenuButton("Device") { expanded = true }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            if (state is ConnectionState.Ready) {
-                DropdownMenuItem(
-                    text = { Text("Status page") },
-                    onClick = { expanded = false; onOpenStatus() },
-                )
-                DropdownMenuItem(
-                    text = { Text("Sensors") },
-                    onClick = { expanded = false; onOpenSensors() },
-                )
-                DropdownMenuItem(
-                    text = { Text("LLM chat") },
-                    onClick = { expanded = false; onOpenLlm() },
-                )
-                DropdownMenuItem(
-                    text = { Text("Files") },
-                    onClick = { expanded = false; onOpenFiles() },
-                )
-                DropdownMenuItem(
-                    text = { Text("Sync clock") },
-                    onClick = { expanded = false; onSyncClock() },
-                )
-            } else {
-                DropdownMenuItem(
-                    text = { Text("Connect…") },
-                    onClick = { expanded = false; onConnect() },
-                )
-            }
-        }
-    }
-}
-
-/** Outlined button with a dropdown caret, styled for the gradient. */
-@Composable
-private fun MenuButton(label: String, onClick: () -> Unit) {
-    val hw = LocalHwColors.current
-    OutlinedButton(
-        onClick = onClick,
-        border = BorderStroke(1.dp, hw.cardBorder),
-        colors = ButtonDefaults.outlinedButtonColors(contentColor = hw.onGradient),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-    ) { OutlinedText("$label ▾", color = hw.onGradient) }
 }
 
 @Composable
@@ -415,7 +287,7 @@ private fun InputBar(
             enabled = enabled,
             singleLine = true,
             shape = CardShape,
-            placeholder = { Text(if (enabled) "type a command (e.g. help)" else "connect to begin") },
+            placeholder = { Text(if (enabled) "type a command (e.g. help)" else "Use 'Devices' to connect") },
             keyboardOptions = KeyboardOptions(
                 autoCorrectEnabled = false,
                 imeAction = ImeAction.Send,

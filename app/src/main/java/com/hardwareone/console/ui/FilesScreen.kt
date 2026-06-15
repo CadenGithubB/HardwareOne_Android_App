@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -30,7 +29,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -56,7 +54,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hardwareone.console.R
@@ -74,7 +71,7 @@ private val CardShape = RoundedCornerShape(14.dp)
  * per-directory permission bitmask reported by the firmware (admin + secure channel required).
  */
 @Composable
-fun FilesScreen(vm: ConsoleViewModel, onBack: () -> Unit) {
+fun FilesScreen(vm: ConsoleViewModel, nav: HeaderNav) {
     val hw = LocalHwColors.current
     val path by vm.filesPath.collectAsState()
     val listing by vm.fileListing.collectAsState()
@@ -121,27 +118,8 @@ fun FilesScreen(vm: ConsoleViewModel, onBack: () -> Unit) {
                 modifier = Modifier.widthIn(max = 760.dp).fillMaxSize().padding(horizontal = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                // Header.
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = onBack) {
-                        Icon(painterResource(R.drawable.ic_arrow_back), "Back", tint = hw.onGradient)
-                    }
-                    Text(
-                        text = "Files",
-                        color = hw.onGradient,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f).padding(start = 4.dp),
-                    )
-                    // While loading, the spinner replaces the refresh icon (same slot).
-                    IconButton(onClick = { vm.loadFiles(path) }, enabled = !busy) {
-                        if (busy) Spinner()
-                        else Icon(painterResource(R.drawable.ic_refresh), "Refresh", tint = hw.onGradient)
-                    }
-                }
+                // Header: switcher + refresh (spinner while busy).
+                AppHeader(nav, busy = busy, onRefresh = { vm.loadFiles(path) })
 
                 // Path + storage.
                 Text(path, color = hw.muted, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)

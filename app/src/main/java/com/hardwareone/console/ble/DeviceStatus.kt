@@ -114,7 +114,8 @@ data class DeviceStatus(
             }
             if (o.has("error")) {
                 return DeviceStatus(
-                    schemaVersion = o.optInt("v", 0),
+                    // schema-shape version: firmware renamed "v" → "schema"; read either.
+                    schemaVersion = o.optInt("schema", o.optInt("v", 0)),
                     firmware = "", board = "", resetReason = "", resetReasonCode = 0,
                     crashCount = 0, systemTime = "", uptime = "",
                     net = null, mem = null, storage = null, connectivity = null,
@@ -122,7 +123,7 @@ data class DeviceStatus(
                 )
             }
             return DeviceStatus(
-                schemaVersion = o.optInt("v", 1),
+                schemaVersion = o.optInt("schema", o.optInt("v", 1)),
                 firmware = o.optString("fw"),
                 board = o.optString("board"),
                 resetReason = o.optString("reset_reason"),

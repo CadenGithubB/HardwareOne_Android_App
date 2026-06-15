@@ -28,8 +28,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -51,7 +49,6 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -59,7 +56,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
-import com.hardwareone.console.R
 import com.hardwareone.console.ble.ChatMessage
 import com.hardwareone.console.ble.LlmStatus
 import com.hardwareone.console.ui.theme.LocalHwColors
@@ -86,7 +82,7 @@ fun LlmChatScreen(
     onStop: () -> Unit,
     onRetry: () -> Unit,
     onClear: () -> Unit,
-    onBack: () -> Unit,
+    nav: HeaderNav,
 ) {
     val hw = LocalHwColors.current
     var input by rememberSaveable { mutableStateOf("") }
@@ -101,26 +97,8 @@ fun LlmChatScreen(
                 modifier = Modifier.widthIn(max = 760.dp).fillMaxSize().padding(horizontal = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                // Header.
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_arrow_back),
-                            contentDescription = "Back",
-                            tint = hw.onGradient,
-                        )
-                    }
-                    Spacer(Modifier.size(4.dp))
-                    Text(
-                        text = "LLM",
-                        color = hw.onGradient,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f),
-                    )
+                // Header: switcher + LLM-specific Retry/Clear actions.
+                AppHeader(nav) {
                     if (!generating && messages.any { it.role == ChatMessage.Role.ASSISTANT }) {
                         OutlinedButton(
                             onClick = onRetry,
@@ -128,7 +106,6 @@ fun LlmChatScreen(
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = hw.onGradient),
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         ) { Text("Retry") }
-                        Spacer(Modifier.size(6.dp))
                     }
                     if (messages.isNotEmpty()) {
                         OutlinedButton(

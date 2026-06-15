@@ -38,6 +38,7 @@ import com.hardwareone.console.ui.ConsoleScreen
 import com.hardwareone.console.ui.ConsoleViewModel
 import com.hardwareone.console.ui.DevicesScreen
 import com.hardwareone.console.ui.FilesScreen
+import com.hardwareone.console.ui.HeaderNav
 import com.hardwareone.console.ui.LlmChatScreen
 import com.hardwareone.console.ui.LoginDialog
 import com.hardwareone.console.ui.LogViewerScreen
@@ -144,18 +145,55 @@ class MainActivity : FragmentActivity() {
                 val widthSizeClass = calculateWindowSizeClass(this).widthSizeClass
                 val foldPosture = rememberFoldPosture(this)
 
+                // The switcher/nav hub lives top-left on every page. Build the right [HeaderNav]
+                // for whichever page is showing — the device-tool dropdown is gated on login
+                // (the tools are all account-gated anyway).
+                val loggedIn by vm.authenticated.collectAsState()
+                val goDevices = { nav.clear(); topPage = AppPage.DEVICES }
+                fun openTool(screen: Screen) { nav.clear(); navTo(screen) }
+                // `current` is the tool screen showing (null on the Console/Devices top pages).
+                // Each dropdown entry for the page you're already on is omitted — same rule the
+                // Devices list page already uses for its own "Devices" entry.
+                fun headerNav(
+                    active: AppPage,
+                    onOpenDevices: (() -> Unit)?,
+                    current: Screen? = null,
+                    onSaveLog: (() -> Unit)? = null,
+                    onClearLog: (() -> Unit)? = null,
+                ) = HeaderNav(
+                    active = active,
+                    onSelect = { p -> nav.clear(); topPage = p },
+                    onOpenSettings = { navTo(Screen.Settings) },
+                    loggedIn = loggedIn,
+                    devicesLabel = when (current) {
+                        Screen.Status -> "Status"
+                        Screen.Sensors -> "Sensors"
+                        Screen.LlmChat -> "LLM Chat"
+                        Screen.Files -> "Files"
+                        else -> "Devices"
+                    },
+                    onOpenDevices = onOpenDevices,
+                    onOpenStatus = ({ openTool(Screen.Status) }).takeIf { current != Screen.Status },
+                    onOpenSensors = ({ openTool(Screen.Sensors) }).takeIf { current != Screen.Sensors },
+                    onOpenLlm = ({ openTool(Screen.LlmChat) }).takeIf { current != Screen.LlmChat },
+                    onOpenFiles = ({ vm.loadFiles("/"); openTool(Screen.Files) }).takeIf { current != Screen.Files },
+                    onSyncClock = vm::syncClock,
+                    onSaveLog = onSaveLog,
+                    onClearLog = onClearLog,
+                )
+
                 when (val screen = nav.lastOrNull()) {
                     null -> when (topPage) {
                         AppPage.CONSOLE -> ConsoleScreen(
                             vm = vm,
                             widthSizeClass = widthSizeClass,
                             foldPosture = foldPosture,
-                            onSelectPage = { topPage = it },
-                            onOpenSettings = { navTo(Screen.Settings) },
-                            onOpenStatus = { navTo(Screen.Status) },
-                            onOpenSensors = { navTo(Screen.Sensors) },
-                            onOpenLlm = { navTo(Screen.LlmChat) },
-                            onOpenFiles = { vm.loadFiles("/"); navTo(Screen.Files) },
+                            nav = headerNav(
+                                active = AppPage.CONSOLE,
+                                onOpenDevices = goDevices,
+                                onSaveLog = if (vm.canSaveLogs) ({ vm.saveCurrentLog() }) else null,
+                                onClearLog = vm::clearLog,
+                            ),
                             onLoginButton = ::onLoginButtonClicked,
                         )
                         AppPage.DEVICES -> {
@@ -174,8 +212,7 @@ class MainActivity : FragmentActivity() {
                                 battery = battery,
                                 onScanClicked = ::onScanClicked,
                                 onLogin = ::onLoginButtonClicked,
-                                onSelectPage = { topPage = it },
-                                onOpenSettings = { navTo(Screen.Settings) },
+                                nav = headerNav(active = AppPage.DEVICES, onOpenDevices = null),
                             )
                         }
                     }
@@ -244,7 +281,7 @@ class MainActivity : FragmentActivity() {
                             deviceInfo = deviceInfo,
                             traffic = bleTraffic,
                             onRefresh = vm::refreshStatus,
-                            onBack = { vm.clearStatus(); navBack() },
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Status),
                         )
                     }
 
@@ -277,7 +314,7 @@ class MainActivity : FragmentActivity() {
                             onSetControl = vm::setControl,
                             onAction = vm::sensorAction,
                             onRefresh = vm::refreshSensors,
-                            onBack = { vm.clearSensors(); navBack() },
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Sensors),
                         )
                     }
 
@@ -315,11 +352,14 @@ class MainActivity : FragmentActivity() {
                             onStop = vm::stopLlmGeneration,
                             onRetry = vm::retryLlm,
                             onClear = vm::clearLlmChat,
-                            onBack = { navBack() },
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.LlmChat),
                         )
                     }
 
-                    Screen.Files -> FilesScreen(vm = vm, onBack = { navBack() })
+                    Screen.Files -> FilesScreen(
+                        vm = vm,
+                        nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Files),
+                    )
 
                     Screen.SavedLogs -> {
                         val savedLogs by vm.savedLogs.collectAsState()

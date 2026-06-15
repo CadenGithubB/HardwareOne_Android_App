@@ -469,9 +469,29 @@ class BleManager(context: Context) {
                     failSecure("Secure handshake failed — wrong passphrase?")
                 }
             }
+            // The device explicitly refused the secure channel and told us why, instead of
+            // going silent — surface that reason rather than letting the handshake time out.
+            SecureChannel.T_REJECT -> {
+                val reason = if (msg.size >= 2) msg[1] else 0
+                failSecure(rejectReason(reason))
+            }
             // Anything else (e.g. a plaintext line from a device not in secure mode) → fail.
             else -> failSecure("Device did not complete the secure handshake — check the passphrase / device secret.")
         }
+    }
+
+    /** Map a device SC_REJECT reason byte to a message the user can act on. */
+    private fun rejectReason(reason: Byte): String = when (reason) {
+        SecureChannel.REJECT_NO_PASSPHRASE ->
+            "This device has no secure passphrase set. Run `blesecret <passphrase>` on the device, " +
+                "or clear the passphrase in Settings to connect in plaintext."
+        SecureChannel.REJECT_AUTH_FAILED ->
+            "Wrong passphrase (or the connection was tampered with). " +
+                "Check the passphrase in Settings and try again."
+        // Any other/future reason byte → treat as a generic auth failure (per the contract).
+        else ->
+            "Device refused the secure channel (reason ${reason.toInt() and 0xff}). " +
+                "Check the passphrase / device secret."
     }
 
     private fun failSecure(reason: String) {

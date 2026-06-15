@@ -29,7 +29,7 @@ data class SensorSnapshot(
                     (arr.optJSONObject(i))?.let { add(parseEntry(it)) }
                 }
             }
-            return SensorSnapshot(o.optInt("v", 1), o.optLong("seq", 0), list)
+            return SensorSnapshot(o.optInt("schema", o.optInt("v", 1)), o.optLong("seq", 0), list)
         }
 
         private fun parseEntry(s: JSONObject): SensorEntry {

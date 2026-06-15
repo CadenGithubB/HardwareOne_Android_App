@@ -23,8 +23,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -43,13 +41,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.hardwareone.console.R
 import com.hardwareone.console.ble.ControlEntry
 import com.hardwareone.console.ble.ControlsModule
 import com.hardwareone.console.ble.ReadingNode
@@ -77,7 +73,7 @@ fun SensorsScreen(
     onSetControl: (moduleId: String, key: String, token: String) -> Unit,
     onAction: (command: String) -> Unit,
     onRefresh: () -> Unit,
-    onBack: () -> Unit,
+    nav: HeaderNav,
 ) {
     val hw = LocalHwColors.current
     Box(
@@ -90,41 +86,7 @@ fun SensorsScreen(
             Column(
                 modifier = Modifier.widthIn(max = 600.dp).fillMaxSize().padding(horizontal = 12.dp),
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_arrow_back),
-                            contentDescription = "Back",
-                            tint = hw.onGradient,
-                        )
-                    }
-                    Spacer(Modifier.size(4.dp))
-                    Text(
-                        text = "Sensors",
-                        color = hw.onGradient,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f),
-                    )
-                    IconButton(onClick = onRefresh, enabled = !loading) {
-                        if (loading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(24.dp),
-                                color = hw.onGradient,
-                                strokeWidth = 2.dp,
-                            )
-                        } else {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_refresh),
-                                contentDescription = "Refresh",
-                                tint = hw.onGradient,
-                            )
-                        }
-                    }
-                }
+                AppHeader(nav, busy = loading, onRefresh = onRefresh)
 
                 Spacer(Modifier.height(8.dp))
 

@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -49,8 +48,7 @@ fun DevicesScreen(
     battery: BatteryInfo?,
     onScanClicked: () -> Unit,
     onLogin: () -> Unit,
-    onSelectPage: (AppPage) -> Unit,
-    onOpenSettings: () -> Unit,
+    nav: HeaderNav,
 ) {
     val hw = LocalHwColors.current
     val state by vm.connectionState.collectAsState()
@@ -76,15 +74,8 @@ fun DevicesScreen(
                 modifier = Modifier.widthIn(max = 600.dp).fillMaxSize().padding(horizontal = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                // Header: toggle + settings.
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    PageToggle(AppPage.DEVICES, onSelectPage)
-                    Spacer(Modifier.weight(1f))
-                    GearButton(onOpenSettings)
-                }
+                // Header: switcher (nav hub) + settings.
+                AppHeader(nav)
 
                 // Only show the connection card once there's actually a device in play —
                 // a fresh launch (idle/disconnected) shows just the action buttons.

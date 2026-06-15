@@ -122,7 +122,13 @@ class SecureChannel(private val psk: ByteArray) {
         const val T_HELLO_ACK: Byte = 0x02
         const val T_CONFIRM: Byte = 0x03
         const val T_CONFIRM_ACK: Byte = 0x04
+        const val T_REJECT: Byte = 0x05
         const val T_DATA: Byte = 0x10
+
+        // SC_REJECT reason byte (payload[0]): the device is telling us why it won't open the
+        // secure channel, instead of going silent and leaving the app to time out.
+        const val REJECT_NO_PASSPHRASE: Byte = 0x01 // device has no `blesecret` configured
+        const val REJECT_AUTH_FAILED: Byte = 0x02   // wrong passphrase, or tampering/MITM
         const val DIR_C2D = 0x00000000
         const val DIR_D2C = 0x00000001
         private const val NONCE_LEN = 16
