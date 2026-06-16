@@ -32,7 +32,9 @@ import com.hardwareone.console.ui.theme.LocalHwColors
 @Composable
 fun GamepadView(x: Double?, y: Double?, buttons: Long) {
     val nx = (((x ?: 512.0) - 512.0) / 512.0).coerceIn(-1.0, 1.0).toFloat()
-    val ny = (((y ?: 512.0) - 512.0) / 512.0).coerceIn(-1.0, 1.0).toFloat()
+    // Y is inverted relative to screen space: stick up should move the dot up (negative bias),
+    // so flip the sign of the raw 0–1023 reading.
+    val ny = (((512.0 - (y ?: 512.0)) / 512.0)).coerceIn(-1.0, 1.0).toFloat()
     fun pressed(bit: Int) = (buttons shr bit) and 1L == 0L
 
     Column(

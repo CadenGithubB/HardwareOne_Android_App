@@ -156,15 +156,6 @@ fun SettingsScreen(
                         }
                     }
 
-                    SecurityCard(
-                        securityAvailable = securityAvailable,
-                        hasSavedCredentials = hasSavedCredentials,
-                        savedUsername = savedUsername,
-                        autoLogin = autoLogin,
-                        onAutoLoginChange = onAutoLoginChange,
-                        onForget = onForget,
-                    )
-
                     LogsCard(
                         logsAvailable = logsAvailable,
                         autoSaveLogs = autoSaveLogs,
@@ -172,11 +163,17 @@ fun SettingsScreen(
                         onOpenSavedLogs = onOpenSavedLogs,
                     )
 
-                    SecureChannelCard(
-                        configured = secureChannelConfigured,
-                        locked = secureChannelLocked,
-                        onSet = onSetChannelPassphrase,
-                        onClear = onClearChannelPassphrase,
+                    SecurityCard(
+                        securityAvailable = securityAvailable,
+                        hasSavedCredentials = hasSavedCredentials,
+                        savedUsername = savedUsername,
+                        autoLogin = autoLogin,
+                        onAutoLoginChange = onAutoLoginChange,
+                        onForget = onForget,
+                        secureChannelConfigured = secureChannelConfigured,
+                        secureChannelLocked = secureChannelLocked,
+                        onSetChannelPassphrase = onSetChannelPassphrase,
+                        onClearChannelPassphrase = onClearChannelPassphrase,
                     )
 
                     Text(
@@ -228,6 +225,10 @@ private fun SecurityCard(
     autoLogin: Boolean,
     onAutoLoginChange: (Boolean) -> Unit,
     onForget: () -> Unit,
+    secureChannelConfigured: Boolean,
+    secureChannelLocked: Boolean,
+    onSetChannelPassphrase: (String) -> Unit,
+    onClearChannelPassphrase: () -> Unit,
 ) {
     val hw = LocalHwColors.current
     Column(
@@ -235,7 +236,8 @@ private fun SecurityCard(
             .fillMaxWidth()
             .clip(CardShape)
             .background(hw.cardBg)
-            .border(1.dp, hw.cardBorder, CardShape)
+            // Border turns red when the secure channel is locked, to flag it as before.
+            .border(1.dp, if (secureChannelLocked) hw.danger else hw.cardBorder, CardShape)
             .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
         Text(
@@ -301,11 +303,23 @@ private fun SecurityCard(
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(top = 8.dp),
         )
+
+        // Secure channel (link encryption) lives under Security too — same concern as login.
+        Spacer(Modifier.height(14.dp))
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(hw.cardBorder))
+        Spacer(Modifier.height(10.dp))
+        SecureChannelSection(
+            configured = secureChannelConfigured,
+            locked = secureChannelLocked,
+            onSet = onSetChannelPassphrase,
+            onClear = onClearChannelPassphrase,
+        )
     }
 }
 
+// Rendered inside [SecurityCard] (no card chrome of its own).
 @Composable
-private fun SecureChannelCard(
+private fun SecureChannelSection(
     configured: Boolean,
     locked: Boolean,
     onSet: (String) -> Unit,
@@ -313,14 +327,7 @@ private fun SecureChannelCard(
 ) {
     val hw = LocalHwColors.current
     var pass by remember { mutableStateOf("") }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(CardShape)
-            .background(hw.cardBg)
-            .border(1.dp, if (locked) hw.danger else hw.cardBorder, CardShape)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-    ) {
+    Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             text = when {
                 locked -> "Secure channel · LOCKED"

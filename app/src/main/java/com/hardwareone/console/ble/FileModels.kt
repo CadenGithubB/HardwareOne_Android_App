@@ -81,7 +81,7 @@ data class FileStats(val total: Long, val used: Long, val free: Long, val usageP
     }
 }
 
-/** `fileread <path> <offset> <len>` → one bounded window of a file. */
+/** `fileread "<path>" <offset> <len>` → one bounded window of a file (path is a quoted token). */
 data class FileReadChunk(
     val success: Boolean,
     val size: Long,
@@ -131,7 +131,7 @@ data class FileTransfer(
     val upload: Boolean = true,
 )
 
-/** `filewrite <path> <offset> <b64chunk> [final]` → device's file size after the write. */
+/** `filewrite "<path>" <offset> <b64chunk> [final]` → device's file size after the write (path quoted). */
 data class FileWriteResult(val success: Boolean, val size: Long, val final: Boolean, val error: String?) {
     companion object {
         fun parse(json: String): FileWriteResult? {

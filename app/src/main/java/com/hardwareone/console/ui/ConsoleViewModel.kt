@@ -436,6 +436,12 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     fun joinPath(dir: String, name: String): String =
         if (dir.endsWith("/")) "$dir$name" else "$dir/$name"
 
+    // The firmware now requires EVERY file-command path to be a double-quoted token (unquoted
+    // paths error). Quoting also lets paths contain spaces. A literal " in a name is unsupported
+    // by the device tokenizer, so callers must reject such names before building a command.
+    private fun q(path: String): String = "\"" + path + "\""
+    private fun hasIllegalQuote(name: String): Boolean = name.contains('"')
+
     private fun parentPath(path: String): String {
         if (path == "/" || path.isEmpty()) return "/"
         val trimmed = path.trimEnd('/')
@@ -448,8 +454,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _filesPath.value = path
         _fileListing.value = null
         _filesBusy.value = true
-        ble.sendCaptured("files json $path", TAG_FILES)
-        ble.sendCaptured("files stats json $path", TAG_FILE_STATS)
+        ble.sendCaptured("files json ${q(path)}", TAG_FILES)
+        ble.sendCaptured("files stats json ${q(path)}", TAG_FILE_STATS)
     }
 
     fun openDir(name: String) = loadFiles(joinPath(_filesPath.value, name))
@@ -493,7 +499,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         readBuf.reset()
         fileOpCancelled = false
         _filesBusy.value = true
-        ble.sendCaptured("fileread $readPath 0 $readWindow", TAG_FILE_READ)
+        ble.sendCaptured("fileread ${q(readPath)} 0 $readWindow", TAG_FILE_READ)
     }
 
     fun closeFileViewer() { _fileViewer.value = null }
@@ -548,7 +554,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
         } else {
-            ble.sendCaptured("fileread $readPath $readOffset $readWindow", TAG_FILE_READ)
+            ble.sendCaptured("fileread ${q(readPath)} $readOffset $readWindow", TAG_FILE_READ)
         }
     }
 
@@ -556,6 +562,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     fun uploadFile(path: String, bytes: ByteArray) {
         if (connectionState.value !is ConnectionState.Ready || _filesBusy.value) return
         val name = path.substringAfterLast('/')
+        if (hasIllegalQuote(path)) {
+            _fileTransfer.value = com.hardwareone.console.ble.FileTransfer(
+                name, 0, bytes.size.toLong(), finished = true,
+                error = "File name can't contain a double-quote (\").",
+            )
+            return
+        }
         if (bytes.size > 256 * 1024) {
             _fileTransfer.value = com.hardwareone.console.ble.FileTransfer(
                 name, 0, bytes.size.toLong(), finished = true,
@@ -578,7 +591,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun chunkSizeFor(path: String): Int {
         val cap = ble.secureCommandCapacity()
-        val overhead = "filewrite ".length + path.length + 1 + 14 + 1 + " final".length + 4
+        // +2 for the surrounding quotes now required around the path.
+        val overhead = "filewrite ".length + path.length + 2 + 1 + 14 + 1 + " final".length + 4
         val b64budget = (cap - overhead).coerceAtLeast(40)
         return ((b64budget / 4) * 3).coerceAtLeast(48) // raw bytes whose base64 fits the budget
     }
@@ -590,7 +604,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         val chunk = bytes.copyOfRange(off, end)
         writeSentFinal = end >= bytes.size
         val b64 = android.util.Base64.encodeToString(chunk, android.util.Base64.NO_WRAP)
-        val cmd = "filewrite $writePath $off $b64" + if (writeSentFinal) " final" else ""
+        val cmd = "filewrite ${q(writePath)} $off $b64" + if (writeSentFinal) " final" else ""
         ble.sendCaptured(cmd, TAG_FILE_WRITE)
     }
 
@@ -626,14 +640,29 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _filesBusy.value = false
     }
 
-    // Text-reply verbs (reply lands on the console; reload to reflect the result).
-    fun makeDir(name: String) = fileVerb("mkdir ${joinPath(_filesPath.value, name)}")
-    fun createFile(pathOrName: String) = fileVerb(
-        "filecreate " + if (pathOrName.startsWith("/")) pathOrName else joinPath(_filesPath.value, pathOrName),
-    )
-    fun renameFile(oldName: String, newName: String) =
-        fileVerb("filerename ${joinPath(_filesPath.value, oldName)} $newName")
-    fun deleteFile(name: String) = fileVerb("filedelete ${joinPath(_filesPath.value, name)} confirm")
+    // Text-reply verbs (reply lands on the console; reload to reflect the result). Every path is a
+    // quoted token; bare trailing flags (confirm) stay unquoted.
+    fun makeDir(name: String) {
+        if (rejectQuotedName(name)) return
+        fileVerb("mkdir ${q(joinPath(_filesPath.value, name))}")
+    }
+    fun createFile(pathOrName: String) {
+        if (rejectQuotedName(pathOrName)) return
+        val path = if (pathOrName.startsWith("/")) pathOrName else joinPath(_filesPath.value, pathOrName)
+        fileVerb("filecreate ${q(path)}")
+    }
+    fun renameFile(oldName: String, newName: String) {
+        if (rejectQuotedName(newName)) return
+        fileVerb("filerename ${q(joinPath(_filesPath.value, oldName))} ${q(newName)}")
+    }
+    fun deleteFile(name: String) = fileVerb("filedelete ${q(joinPath(_filesPath.value, name))} confirm")
+
+    /** Reject a user-typed name with a " (the firmware tokenizer can't represent it). */
+    private fun rejectQuotedName(name: String): Boolean {
+        if (!hasIllegalQuote(name)) return false
+        reportError("Name can't contain a double-quote (\").")
+        return true
+    }
 
     private fun fileVerb(command: String) {
         if (connectionState.value !is ConnectionState.Ready) return
