@@ -145,6 +145,28 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private val _controlsLoading = MutableStateFlow<Set<String>>(emptySet())
     val controlsLoading: StateFlow<Set<String>> = _controlsLoading.asStateFlow()
 
+    // --- ESP-NOW page (Phase 1: read-only status + peer list via the `... json` commands) ---
+    private val _espNowMode = MutableStateFlow<com.hardwareone.console.ble.EspNowMode?>(null)
+    val espNowMode: StateFlow<com.hardwareone.console.ble.EspNowMode?> = _espNowMode.asStateFlow()
+    private val _espNowEnc = MutableStateFlow<com.hardwareone.console.ble.EspNowEnc?>(null)
+    val espNowEnc: StateFlow<com.hardwareone.console.ble.EspNowEnc?> = _espNowEnc.asStateFlow()
+    private val _espNowMeshRole = MutableStateFlow<com.hardwareone.console.ble.EspNowMeshRole?>(null)
+    val espNowMeshRole: StateFlow<com.hardwareone.console.ble.EspNowMeshRole?> = _espNowMeshRole.asStateFlow()
+    private val _espNowDeviceInfo = MutableStateFlow<com.hardwareone.console.ble.EspNowDeviceInfo?>(null)
+    val espNowDeviceInfo: StateFlow<com.hardwareone.console.ble.EspNowDeviceInfo?> = _espNowDeviceInfo.asStateFlow()
+    private val _espNowPaired = MutableStateFlow<com.hardwareone.console.ble.EspNowPaired?>(null)
+    val espNowPaired: StateFlow<com.hardwareone.console.ble.EspNowPaired?> = _espNowPaired.asStateFlow()
+    private val _espNowMesh = MutableStateFlow<com.hardwareone.console.ble.EspNowMeshStatus?>(null)
+    val espNowMesh: StateFlow<com.hardwareone.console.ble.EspNowMeshStatus?> = _espNowMesh.asStateFlow()
+    private val _espNowLoading = MutableStateFlow(false)
+    val espNowLoading: StateFlow<Boolean> = _espNowLoading.asStateFlow()
+
+    // Per-peer message feed (device detail screen): incoming messages + optimistic local echoes.
+    private val _espNowFeed = MutableStateFlow<List<com.hardwareone.console.ble.EspNowChatLine>>(emptyList())
+    val espNowFeed: StateFlow<List<com.hardwareone.console.ble.EspNowChatLine>> = _espNowFeed.asStateFlow()
+    private var espNowFeedMac = ""
+    private var espNowFeedSince = 0L
+
     // --- Credential storage state ---
     /** Device can present a biometric/PIN prompt (a credential is enrolled). */
     val canUseCredentialStore: Boolean get() = credentials.canAuthenticate()
@@ -223,6 +245,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_FILE_STATS -> onFileStatsCapture(capture.text)
                         tag == TAG_FILE_READ -> onFileReadCapture(capture.text, capture.timedOut)
                         tag == TAG_FILE_WRITE -> onFileWriteCapture(capture.text, capture.timedOut)
+                        tag == TAG_EN_MODE -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowMode.parse(capture.text)?.let { _espNowMode.value = it } }
+                        tag == TAG_EN_ENC -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowEnc.parse(capture.text)?.let { _espNowEnc.value = it } }
+                        tag == TAG_EN_MESHROLE -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowMeshRole.parse(capture.text)?.let { _espNowMeshRole.value = it } }
+                        tag == TAG_EN_DEVINFO -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowDeviceInfo.parse(capture.text)?.let { _espNowDeviceInfo.value = it } }
+                        tag == TAG_EN_LIST -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowPaired.parse(capture.text)?.let { _espNowPaired.value = it } }
+                        tag == TAG_EN_MESH -> { _espNowLoading.value = false; if (!capture.timedOut) com.hardwareone.console.ble.EspNowMeshStatus.parse(capture.text)?.let { _espNowMesh.value = it } }
+                        tag == TAG_EN_MSGS -> { if (!capture.timedOut) onEspNowFeedMessages(capture.text) }
                         tag.startsWith(TAG_CONTROLS_PREFIX) ->
                             onControlsCapture(tag.removePrefix(TAG_CONTROLS_PREFIX), capture.text)
                     }
@@ -318,6 +347,79 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _i2cLoading.value = false
         if (timedOut || text.isBlank()) return // keep whatever we had; user can retry
         com.hardwareone.console.ble.I2cDevice.parseList(text)?.let { _i2cDevices.value = it }
+    }
+
+    // --- ESP-NOW page ----------------------------------------------------------------
+
+    /** Load the full ESP-NOW snapshot (config + paired list + live mesh). Used on open + refresh. */
+    fun loadEspNow() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        _espNowLoading.value = true
+        ble.sendCaptured("espnowmode json", TAG_EN_MODE)
+        ble.sendCaptured("espnowencstatus json", TAG_EN_ENC)
+        ble.sendCaptured("espnowmeshrole json", TAG_EN_MESHROLE)
+        ble.sendCaptured("espnowdeviceinfo json", TAG_EN_DEVINFO)
+        ble.sendCaptured("espnowlist json", TAG_EN_LIST)
+        ble.sendCaptured("espnowmeshstatus json", TAG_EN_MESH) // sent last → clears the busy flag
+    }
+
+    /** Poll just the dynamic bits (paired liveness + mesh peers) on a timer. */
+    fun refreshEspNowPeers() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCaptured("espnowlist json", TAG_EN_LIST)
+        ble.sendCaptured("espnowmeshstatus json", TAG_EN_MESH)
+    }
+
+    fun clearEspNow() {
+        _espNowMode.value = null
+        _espNowEnc.value = null
+        _espNowMeshRole.value = null
+        _espNowDeviceInfo.value = null
+        _espNowPaired.value = null
+        _espNowMesh.value = null
+        _espNowLoading.value = false
+    }
+
+    // --- ESP-NOW per-peer message feed (device detail screen) ---
+
+    /** Begin a fresh feed for [mac]: clear, reset the seq cursor, and pull what's buffered. */
+    fun openEspNowFeed(mac: String) {
+        espNowFeedMac = mac
+        espNowFeedSince = 0L
+        _espNowFeed.value = emptyList()
+        pollEspNowFeed()
+    }
+
+    /** Poll new messages for the open peer (`espnowmessages json <since> <mac>`). */
+    fun pollEspNowFeed() {
+        if (connectionState.value !is ConnectionState.Ready || espNowFeedMac.isEmpty()) return
+        ble.sendCaptured("espnowmessages json $espNowFeedSince $espNowFeedMac", TAG_EN_MSGS)
+    }
+
+    /** Send a text message to the peer (`espnowsend <mac> <message>`) with an optimistic echo. */
+    fun sendEspNowMessage(mac: String, text: String) {
+        if (connectionState.value !is ConnectionState.Ready || text.isBlank()) return
+        _espNowFeed.value = (_espNowFeed.value + com.hardwareone.console.ble.EspNowChatLine("me", text, true)).takeLast(200)
+        ble.sendCommand("espnowsend $mac $text")
+    }
+
+    fun clearEspNowFeed() {
+        espNowFeedMac = ""
+        espNowFeedSince = 0L
+        _espNowFeed.value = emptyList()
+    }
+
+    private fun onEspNowFeedMessages(text: String) {
+        val parsed = com.hardwareone.console.ble.EspNowMessages.parse(text) ?: return
+        if (parsed.error != null || parsed.messages.isEmpty()) return
+        // The query filters to seq > since, but guard anyway; advance the cursor to the newest.
+        val fresh = parsed.messages.filter { it.seq > espNowFeedSince }
+        if (fresh.isEmpty()) return
+        espNowFeedSince = parsed.messages.maxOf { it.seq }
+        val lines = fresh.map {
+            com.hardwareone.console.ble.EspNowChatLine(it.name.ifEmpty { it.mac }, it.msg, false)
+        }
+        _espNowFeed.value = (_espNowFeed.value + lines).takeLast(200)
     }
 
     // --- Sensors page ----------------------------------------------------------------
@@ -1138,5 +1240,12 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_FILE_STATS = "filestats"
         const val TAG_FILE_READ = "fileread"
         const val TAG_FILE_WRITE = "filewrite"
+        const val TAG_EN_MODE = "enmode"
+        const val TAG_EN_ENC = "enenc"
+        const val TAG_EN_MESHROLE = "enmeshrole"
+        const val TAG_EN_DEVINFO = "endevinfo"
+        const val TAG_EN_LIST = "enlist"
+        const val TAG_EN_MESH = "enmesh"
+        const val TAG_EN_MSGS = "enmsgs"
     }
 }

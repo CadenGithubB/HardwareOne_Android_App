@@ -81,6 +81,7 @@ class HeaderNav(
     val onOpenSensors: (() -> Unit)? = null,
     val onOpenLlm: (() -> Unit)? = null,
     val onOpenFiles: (() -> Unit)? = null,
+    val onOpenEspNow: (() -> Unit)? = null,
     val onSyncClock: (() -> Unit)? = null,
     val onSaveLog: (() -> Unit)? = null,
     val onClearLog: (() -> Unit)? = null,
@@ -130,7 +131,7 @@ fun AppHeader(
 // in sync with MainActivity's `devicesLabel` mapping — plus "Console"). BOTH segments reserve the
 // widest of these, so the switcher is a fixed size, never resizes as you move between pages, and
 // the two segments are always the same width as each other.
-private val SWITCHER_LABELS = listOf("Devices", "Status", "Sensors", "LLM Chat", "Files", "Console")
+private val SWITCHER_LABELS = listOf("Devices", "Status", "Sensors", "LLM Chat", "Files", "ESP-NOW", "Console")
 
 @Composable
 fun PageToggle(nav: HeaderNav) {
@@ -156,6 +157,7 @@ fun PageToggle(nav: HeaderNav) {
                     nav.onOpenSensors?.let { go -> DropdownMenuItem(text = { Text("Sensors") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenLlm?.let { go -> DropdownMenuItem(text = { Text("LLM Chat") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenFiles?.let { go -> DropdownMenuItem(text = { Text("Files") }, onClick = { devMenu = false; go() }) }
+                    nav.onOpenEspNow?.let { go -> DropdownMenuItem(text = { Text("ESP-NOW") }, onClick = { devMenu = false; go() }) }
                     nav.onSyncClock?.let { go -> DropdownMenuItem(text = { Text("Sync clock") }, onClick = { devMenu = false; go() }) }
                 }
             } else {

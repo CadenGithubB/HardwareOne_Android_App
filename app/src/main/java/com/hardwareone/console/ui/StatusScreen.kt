@@ -202,6 +202,17 @@ private fun StatusBody(
             InfoRow("Encrypted", yn(it.encrypted))
         }
     }
+    c.bond?.let {
+        SectionCard("Bond") {
+            InfoRow("Enabled", yn(it.enabled))
+            if (it.enabled) {
+                InfoRow("Role", it.role.ifEmpty { "—" })
+                InfoRow("Online", yn(it.online))
+                InfoRow("Synced", yn(it.synced))
+                if (it.peer.isNotEmpty()) InfoRow("Peer", it.peer)
+            }
+        }
+    }
     c.mqtt?.let {
         SectionCard("MQTT") {
             InfoRow("Enabled", yn(it.enabled))
@@ -234,7 +245,7 @@ private fun StatusBody(
 }
 
 @Composable
-private fun SectionCard(title: String, content: @Composable () -> Unit) {
+internal fun SectionCard(title: String, content: @Composable () -> Unit) {
     val hw = LocalHwColors.current
     Column(
         modifier = Modifier
@@ -398,7 +409,7 @@ private fun I2cCard(
 }
 
 @Composable
-private fun InfoRow(label: String, value: String) {
+internal fun InfoRow(label: String, value: String) {
     val hw = LocalHwColors.current
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -444,7 +455,7 @@ private fun Banner(text: String) {
     }
 }
 
-private fun yn(b: Boolean): String = if (b) "yes" else "no"
+internal fun yn(b: Boolean): String = if (b) "yes" else "no"
 
 private fun bytesLabel(n: Long): String = when {
     n < 1024 -> "$n B"

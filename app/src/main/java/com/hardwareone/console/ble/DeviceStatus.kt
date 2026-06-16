@@ -53,6 +53,7 @@ data class DeviceStatus(
 
     data class Connectivity(
         val espnow: EspNow?,
+        val bond: Bond?,
         val mqtt: Mqtt?,
         val bluetooth: Bluetooth?,
         val webserver: WebServer?,
@@ -66,6 +67,15 @@ data class DeviceStatus(
             val deviceName: String,
             val encrypted: Boolean,
             val passphraseSet: Boolean,
+        )
+
+        /** Summary of the 1:1 ESP-NOW bond (full detail is in `bondstatus json`). */
+        data class Bond(
+            val enabled: Boolean,
+            val role: String, // "master"/"worker"; firmware emits int today, normalized on parse
+            val online: Boolean,
+            val synced: Boolean,
+            val peer: String,
         )
 
         data class Mqtt(val enabled: Boolean, val connected: Boolean, val host: String)
@@ -172,6 +182,18 @@ data class DeviceStatus(
                                 deviceName = it.optString("deviceName"),
                                 encrypted = it.optBoolean("encrypted"),
                                 passphraseSet = it.optBoolean("passphraseSet"),
+                            )
+                        },
+                        bond = c.optJSONObject("bond")?.let {
+                            // role is an int (0/1) in status json today; tolerate the planned
+                            // switch to a "master"/"worker" string.
+                            val r = it.optString("role")
+                            Connectivity.Bond(
+                                enabled = it.optBoolean("enabled"),
+                                role = when (r) { "1" -> "master"; "0" -> "worker"; else -> r },
+                                online = it.optBoolean("online"),
+                                synced = it.optBoolean("synced"),
+                                peer = it.optString("peer"),
                             )
                         },
                         mqtt = c.optJSONObject("mqtt")?.let {

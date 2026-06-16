@@ -37,6 +37,8 @@ import com.hardwareone.console.ui.AppPage
 import com.hardwareone.console.ui.ConsoleScreen
 import com.hardwareone.console.ui.ConsoleViewModel
 import com.hardwareone.console.ui.DevicesScreen
+import com.hardwareone.console.ui.EspNowDeviceScreen
+import com.hardwareone.console.ui.EspNowScreen
 import com.hardwareone.console.ui.FilesScreen
 import com.hardwareone.console.ui.HeaderNav
 import com.hardwareone.console.ui.LlmChatScreen
@@ -79,6 +81,8 @@ class MainActivity : FragmentActivity() {
         data object Sensors : Screen
         data object LlmChat : Screen
         data object Files : Screen
+        data object EspNow : Screen
+        data class EspNowDevice(val mac: String, val name: String) : Screen
         data object SavedLogs : Screen
         data class Viewer(val fileName: String, val title: String, val text: String) : Screen
     }
@@ -170,6 +174,7 @@ class MainActivity : FragmentActivity() {
                         Screen.Sensors -> "Sensors"
                         Screen.LlmChat -> "LLM Chat"
                         Screen.Files -> "Files"
+                        Screen.EspNow -> "ESP-NOW"
                         else -> "Devices"
                     },
                     onOpenDevices = onOpenDevices,
@@ -177,6 +182,7 @@ class MainActivity : FragmentActivity() {
                     onOpenSensors = ({ openTool(Screen.Sensors) }).takeIf { current != Screen.Sensors },
                     onOpenLlm = ({ openTool(Screen.LlmChat) }).takeIf { current != Screen.LlmChat },
                     onOpenFiles = ({ vm.loadFiles("/"); openTool(Screen.Files) }).takeIf { current != Screen.Files },
+                    onOpenEspNow = ({ openTool(Screen.EspNow) }).takeIf { current != Screen.EspNow },
                     onSyncClock = vm::syncClock,
                     onSaveLog = onSaveLog,
                     onClearLog = onClearLog,
@@ -360,6 +366,58 @@ class MainActivity : FragmentActivity() {
                         vm = vm,
                         nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Files),
                     )
+
+                    Screen.EspNow -> {
+                        val enMode by vm.espNowMode.collectAsState()
+                        val enEnc by vm.espNowEnc.collectAsState()
+                        val enMeshRole by vm.espNowMeshRole.collectAsState()
+                        val enDevInfo by vm.espNowDeviceInfo.collectAsState()
+                        val enPaired by vm.espNowPaired.collectAsState()
+                        val enMesh by vm.espNowMesh.collectAsState()
+                        val enLoading by vm.espNowLoading.collectAsState()
+                        // Load the full snapshot on open; then poll just the live bits (peers/list).
+                        LaunchedEffect(Unit) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                vm.loadEspNow()
+                                while (true) {
+                                    kotlinx.coroutines.delay(5_000)
+                                    vm.refreshEspNowPeers()
+                                }
+                            }
+                        }
+                        EspNowScreen(
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.EspNow),
+                            mode = enMode,
+                            enc = enEnc,
+                            meshRole = enMeshRole,
+                            deviceInfo = enDevInfo,
+                            paired = enPaired,
+                            mesh = enMesh,
+                            loading = enLoading,
+                            onRefresh = vm::loadEspNow,
+                            onOpenDevice = { mac, name -> navTo(Screen.EspNowDevice(mac, name)) },
+                        )
+                    }
+
+                    is Screen.EspNowDevice -> {
+                        val feed by vm.espNowFeed.collectAsState()
+                        LaunchedEffect(screen.mac) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                vm.openEspNowFeed(screen.mac)
+                                while (true) {
+                                    kotlinx.coroutines.delay(2_500)
+                                    vm.pollEspNowFeed()
+                                }
+                            }
+                        }
+                        EspNowDeviceScreen(
+                            deviceName = screen.name,
+                            mac = screen.mac,
+                            feed = feed,
+                            onSend = { vm.sendEspNowMessage(screen.mac, it) },
+                            onBack = { vm.clearEspNowFeed(); navBack() },
+                        )
+                    }
 
                     Screen.SavedLogs -> {
                         val savedLogs by vm.savedLogs.collectAsState()
