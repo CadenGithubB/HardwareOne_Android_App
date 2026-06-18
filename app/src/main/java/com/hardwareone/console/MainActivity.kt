@@ -37,6 +37,7 @@ import com.hardwareone.console.ui.AppPage
 import com.hardwareone.console.ui.ConsoleScreen
 import com.hardwareone.console.ui.ConsoleViewModel
 import com.hardwareone.console.ui.DevicesScreen
+import com.hardwareone.console.ui.EspNowConfigScreen
 import com.hardwareone.console.ui.EspNowDeviceScreen
 import com.hardwareone.console.ui.EspNowScreen
 import com.hardwareone.console.ui.FilesScreen
@@ -82,6 +83,7 @@ class MainActivity : FragmentActivity() {
         data object LlmChat : Screen
         data object Files : Screen
         data object EspNow : Screen
+        data object EspNowConfig : Screen
         data class EspNowDevice(val mac: String, val name: String) : Screen
         data object SavedLogs : Screen
         data class Viewer(val fileName: String, val title: String, val text: String) : Screen
@@ -396,25 +398,72 @@ class MainActivity : FragmentActivity() {
                             loading = enLoading,
                             onRefresh = vm::loadEspNow,
                             onOpenDevice = { mac, name -> navTo(Screen.EspNowDevice(mac, name)) },
+                            onOpenConfig = { navTo(Screen.EspNowConfig) },
+                        )
+                    }
+
+                    Screen.EspNowConfig -> {
+                        val cInfo by vm.espNowDeviceInfo.collectAsState()
+                        val cMode by vm.espNowMode.collectAsState()
+                        val cRole by vm.espNowMeshRole.collectAsState()
+                        val cEnc by vm.espNowEnc.collectAsState()
+                        // Re-read periodically so the Enabled/mode/role reflect openespnow etc. once
+                        // they settle (openespnow can take a moment to initialize).
+                        LaunchedEffect(Unit) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                vm.loadEspNow()
+                                while (true) { kotlinx.coroutines.delay(3_000); vm.loadEspNow() }
+                            }
+                        }
+                        EspNowConfigScreen(
+                            info = cInfo,
+                            mode = cMode,
+                            meshRole = cRole,
+                            running = cEnc?.running == true,
+                            onSetName = vm::setEspNowName,
+                            onSetFriendlyName = vm::setEspNowFriendlyName,
+                            onSetRoom = vm::setEspNowRoom,
+                            onSetZone = vm::setEspNowZone,
+                            onSetTags = vm::setEspNowTags,
+                            onSetStationary = vm::setEspNowStationary,
+                            onSetMode = vm::setEspNowMode,
+                            onSetMeshRole = vm::setEspNowMeshRole,
+                            onSetEnabled = vm::setEspNowEnabled,
+                            onBack = { navBack() },
                         )
                     }
 
                     is Screen.EspNowDevice -> {
                         val feed by vm.espNowFeed.collectAsState()
+                        val enc by vm.espNowEnc.collectAsState()
+                        val rBusy by vm.espNowRemoteBusy.collectAsState()
+                        val rError by vm.espNowRemoteError.collectAsState()
+                        val rResult by vm.espNowRemoteResult.collectAsState()
                         LaunchedEffect(screen.mac) {
                             repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                // The VM self-drives a reply-driven forward-paging loop (one request
+                                // in flight; next page fires only after the previous reply lands), so
+                                // there's no timer here that could queue redundant re-fetches.
                                 vm.openEspNowFeed(screen.mac)
-                                while (true) {
-                                    kotlinx.coroutines.delay(2_500)
-                                    vm.pollEspNowFeed()
+                                try {
+                                    kotlinx.coroutines.awaitCancellation()
+                                } finally {
+                                    vm.pauseEspNowFeed()
                                 }
                             }
                         }
                         EspNowDeviceScreen(
                             deviceName = screen.name,
                             mac = screen.mac,
+                            encrypted = enc?.encrypted == true,
                             feed = feed,
                             onSend = { vm.sendEspNowMessage(screen.mac, it) },
+                            remoteBusy = rBusy,
+                            remoteError = rError,
+                            remoteResult = rResult,
+                            onRunCommand = { user, pass, cmd -> vm.runEspNowRemote(screen.mac, user, pass, cmd) },
+                            onUnpair = { vm.unpairEspNow(screen.mac); vm.clearEspNowFeed(); navBack(); vm.refreshEspNowPeers() },
+                            onForget = { vm.forgetEspNow(screen.mac); vm.clearEspNowFeed(); navBack(); vm.refreshEspNowPeers() },
                             onBack = { vm.clearEspNowFeed(); navBack() },
                         )
                     }

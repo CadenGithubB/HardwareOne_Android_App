@@ -177,6 +177,17 @@ data class EspNowMessages(val messages: List<Message>, val error: String?) {
  */
 data class EspNowChatLine(val from: String, val text: String, val outgoing: Boolean, val state: Int = -1)
 
+/** Relay send ack (`espnowremote/browse/fetch … json`) → `{ok, reqId}` or `{ok:false, error}`. */
+data class EspNowAck(val ok: Boolean, val reqId: Long, val error: String?) {
+    companion object {
+        fun parse(json: String): EspNowAck? {
+            val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
+            val ok = o.optBoolean("ok", false)
+            return EspNowAck(ok, o.optLong("reqId"), if (ok) null else o.optString("error").ifEmpty { "failed" })
+        }
+    }
+}
+
 /** `espnowmeshstatus json` → live mesh peers + discovered (unpaired) devices. */
 data class EspNowMeshStatus(
     val peers: List<Peer>,

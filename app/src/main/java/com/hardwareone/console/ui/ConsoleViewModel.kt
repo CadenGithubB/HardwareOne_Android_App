@@ -168,7 +168,19 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     val espNowFeed: StateFlow<List<com.hardwareone.console.ble.EspNowChatLine>> = _espNowFeed.asStateFlow()
     private var espNowFeedMac = ""
     private var espNowFeedSince = 0L
+    private var espNowFeedActive = false   // drain loop runs while the device screen is RESUMED
+    private var espNowPollInFlight = false // at most ONE espnowmessages request outstanding
     private val espNowRecords = LinkedHashMap<Long, com.hardwareone.console.ble.EspNowMessages.Message>()
+
+    // Remote command runner (device detail → Command tab).
+    private val _espNowRemoteBusy = MutableStateFlow(false)
+    val espNowRemoteBusy: StateFlow<Boolean> = _espNowRemoteBusy.asStateFlow()
+    private val _espNowRemoteError = MutableStateFlow<String?>(null)
+    val espNowRemoteError: StateFlow<String?> = _espNowRemoteError.asStateFlow()
+    private val _espNowRemoteResult = MutableStateFlow<String?>(null)
+    val espNowRemoteResult: StateFlow<String?> = _espNowRemoteResult.asStateFlow()
+    private var espNowRemoteReqId = 0L
+    private var espNowRemoteLastProgressMs = 0L
 
     // --- Credential storage state ---
     /** Device can present a biometric/PIN prompt (a credential is enrolled). */
@@ -254,7 +266,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_EN_DEVINFO -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowDeviceInfo.parse(capture.text)?.let { _espNowDeviceInfo.value = it } }
                         tag == TAG_EN_LIST -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowPaired.parse(capture.text)?.let { _espNowPaired.value = it } }
                         tag == TAG_EN_MESH -> { _espNowLoading.value = false; if (!capture.timedOut) com.hardwareone.console.ble.EspNowMeshStatus.parse(capture.text)?.let { _espNowMesh.value = it } }
-                        tag == TAG_EN_MSGS -> { if (!capture.timedOut) onEspNowFeedMessages(capture.text) }
+                        tag == TAG_EN_MSGS -> onEspNowFeedMessages(capture.text, capture.timedOut)
+                        tag == TAG_EN_REMOTE_ACK -> onEspNowRemoteAck(capture.text, capture.timedOut)
                         tag.startsWith(TAG_CONTROLS_PREFIX) ->
                             onControlsCapture(tag.removePrefix(TAG_CONTROLS_PREFIX), capture.text)
                     }
@@ -385,40 +398,77 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- ESP-NOW per-peer message feed (device detail screen) ---
 
-    /** Begin a fresh feed for [mac]: clear, reset the seq cursor, and pull what's buffered. */
+    /** Begin a fresh feed for [mac]: clear, reset the seq cursor, and pull what's buffered. Resuming
+     *  the SAME peer (e.g. a lifecycle re-entry) keeps the forward cursor instead of restarting at
+     *  since=0 — restarting mid-pull re-reads the rolling ring and replays a prior run's output
+     *  interleaved with the new one (serialize contract rule 4). A genuinely new peer resets. */
     fun openEspNowFeed(mac: String) {
-        espNowFeedMac = mac
-        espNowFeedSince = 0L
-        espNowRecords.clear()
-        _espNowFeed.value = emptyList()
-        pollEspNowFeed()
+        if (mac != espNowFeedMac) {
+            espNowFeedMac = mac
+            espNowFeedSince = 0L
+            espNowRecords.clear()
+            _espNowFeed.value = emptyList()
+            clearEspNowRemote()
+        }
+        espNowFeedActive = true
+        schedulePoll(0) // start (or resume) the reply-driven drain loop
     }
 
-    /** Poll new messages for the open peer (`espnowmessages json <since> <mac>`). */
-    fun pollEspNowFeed() {
-        if (connectionState.value !is ConnectionState.Ready || espNowFeedMac.isEmpty()) return
-        ble.sendCaptured("espnowmessages json $espNowFeedSince $espNowFeedMac", TAG_EN_MSGS)
+    /** Stop the drain loop without discarding the cursor/records (the screen left RESUMED). */
+    fun pauseEspNowFeed() { espNowFeedActive = false }
+
+    /**
+     * Reply-driven paging: at most ONE `espnowmessages` request is outstanding. The next page is
+     * fired only after the previous reply is processed (in [onEspNowFeedMessages]) — so a forward
+     * pull never re-issues a page it's already fetching. The old fixed-interval timer queued the
+     * same `since` many times over (each an 8-record BLE round trip), which is what made a memreport
+     * pull crawl for ~40s instead of ~6s.
+     */
+    private fun schedulePoll(delayMs: Long) {
+        if (!espNowFeedActive || espNowPollInFlight) return
+        espNowPollInFlight = true
+        viewModelScope.launch {
+            if (delayMs > 0) kotlinx.coroutines.delay(delayMs)
+            if (!espNowFeedActive || connectionState.value !is ConnectionState.Ready || espNowFeedMac.isEmpty()) {
+                espNowPollInFlight = false
+                return@launch
+            }
+            ble.sendCaptured("espnowmessages json $espNowFeedSince $espNowFeedMac", TAG_EN_MSGS)
+            // espNowPollInFlight is cleared when the reply (or capture timeout) lands.
+        }
     }
+
+    /** Nudge the drain loop (e.g. after sending a chat message) if it happens to be idle. */
+    fun pollEspNowFeed() = schedulePoll(0)
 
     /** Send a text message to the peer (`espnowsend <mac> <message>`). The send is recorded in
      *  shared device history, so it comes back through the feed (no optimistic echo to de-dupe). */
     fun sendEspNowMessage(mac: String, text: String) {
         if (connectionState.value !is ConnectionState.Ready || text.isBlank()) return
         ble.sendCommand("espnowsend $mac $text")
-        // Pull the just-recorded message in promptly rather than waiting for the next timer tick.
-        viewModelScope.launch { kotlinx.coroutines.delay(700); pollEspNowFeed() }
     }
 
     fun clearEspNowFeed() {
+        espNowFeedActive = false
         espNowFeedMac = ""
         espNowFeedSince = 0L
         espNowRecords.clear()
         _espNowFeed.value = emptyList()
     }
 
-    private fun onEspNowFeedMessages(text: String) {
-        val parsed = com.hardwareone.console.ble.EspNowMessages.parse(text) ?: return
-        if (parsed.error != null || parsed.messages.isEmpty()) return
+    private fun onEspNowFeedMessages(text: String, timedOut: Boolean) {
+        espNowPollInFlight = false
+        if (!espNowFeedActive) return
+        if (timedOut) { schedulePoll(500); return } // dropped reply — retry the same cursor shortly
+        val parsed = com.hardwareone.console.ble.EspNowMessages.parse(text)
+        if (parsed == null || parsed.error != null) { schedulePoll(500); return }
+        if (parsed.messages.isEmpty()) {
+            // Empty page ({"messages":[]}) = the device is caught up: the pull terminator (serialize
+            // contract rule 3). Once the command's output has been collected, this ends the pull.
+            if (_espNowRemoteBusy.value && _espNowRemoteResult.value != null) _espNowRemoteBusy.value = false
+            schedulePoll(1_200) // idle cadence — watch for new chat / late-arriving output
+            return
+        }
         var changed = false
         for (m in parsed.messages) {
             if (m.seq > espNowFeedSince) espNowFeedSince = m.seq
@@ -428,28 +478,124 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         if (espNowRecords.size > 300) {
             espNowRecords.keys.sorted().take(espNowRecords.size - 300).forEach { espNowRecords.remove(it) }
         }
-        if (changed) recomputeEspNowFeed()
+        if (changed) {
+            // New records = progress; keep the remote-command watchdog alive while output flows.
+            if (_espNowRemoteBusy.value) espNowRemoteLastProgressMs = android.os.SystemClock.elapsedRealtime()
+            recomputeEspNowFeed()
+        }
+        schedulePoll(0) // full page received — drain the next one immediately (forward paging)
     }
 
-    /** Reassemble accumulated records into display lines: chunked messages (reqId != 0) are grouped
-     *  and concatenated in piece order; unsolicited messages (reqId 0) stand alone. */
+    /** Reassemble accumulated records: chunked messages (reqId != 0) are grouped and concatenated
+     *  in piece order; unsolicited messages (reqId 0) stand alone. Command results (received, with
+     *  a nonzero reqId) are routed to the Command tab via [_espNowRemoteResult], not the chat feed. */
     private fun recomputeEspNowFeed() {
+        val sorted = espNowRecords.values.sortedBy { it.seq }
+
+        // Command result: the records carrying the issued command's reqId (serialize contract rule
+        // 5), in seq order. The firmware tags streamed output (memreport/logs) with the command's
+        // reqId too, so this captures the full body. Not gated on the busy flag, so a late-paged
+        // frame keeps appending; the empty-page terminator just stops the spinner.
+        if (espNowRemoteReqId != 0L) {
+            val out = sorted.filter { !it.sent && it.reqId == espNowRemoteReqId }
+            if (out.isNotEmpty()) _espNowRemoteResult.value = out.joinToString("") { it.msg }
+        }
+
+        // Chat feed: group/reassemble chunked messages (reqId != 0); reqId-0 stand alone. Received
+        // records carrying a nonzero reqId are remote-command output → Command tab, not chat.
         val groups = LinkedHashMap<String, MutableList<com.hardwareone.console.ble.EspNowMessages.Message>>()
-        for (m in espNowRecords.values.sortedBy { it.seq }) {
+        for (m in sorted) {
             val key = if (m.reqId != 0L) "r${m.reqId}" else "s${m.seq}"
             groups.getOrPut(key) { mutableListOf() }.add(m)
         }
-        _espNowFeed.value = groups.values.map { group ->
+        val chat = mutableListOf<com.hardwareone.console.ble.EspNowChatLine>()
+        for (group in groups.values) {
             val ordered = group.sortedBy { it.piece }
             val first = ordered.first()
-            com.hardwareone.console.ble.EspNowChatLine(
-                from = first.name.ifEmpty { first.mac },
-                text = ordered.joinToString("") { it.msg },
-                outgoing = first.sent,
-                state = if (first.sent) first.sendState else -1,
-            )
-        }.takeLast(200)
+            val isCommandResponse = !first.sent && first.reqId != 0L
+            if (!isCommandResponse) {
+                chat.add(
+                    com.hardwareone.console.ble.EspNowChatLine(
+                        from = first.name.ifEmpty { first.mac },
+                        text = ordered.joinToString("") { it.msg },
+                        outgoing = first.sent,
+                        state = if (first.sent) first.sendState else -1,
+                    ),
+                )
+            }
+        }
+        _espNowFeed.value = chat.takeLast(200)
     }
+
+    // --- ESP-NOW remote command runner (device detail → Command tab) ---
+
+    /** Run a CLI command on a peer (`espnowremote … json`); the result arrives via the feed and is
+     *  matched by reqId into [espNowRemoteResult]. Requires ESP-NOW encryption + the peer's creds. */
+    fun runEspNowRemote(mac: String, user: String, pass: String, command: String) {
+        if (connectionState.value !is ConnectionState.Ready || command.isBlank()) return
+        _espNowRemoteError.value = null
+        _espNowRemoteResult.value = null
+        espNowRemoteReqId = 0L
+        _espNowRemoteBusy.value = true
+        ble.sendCaptured("espnowremote $mac $user $pass $command json", TAG_EN_REMOTE_ACK)
+    }
+
+    private fun onEspNowRemoteAck(text: String, timedOut: Boolean) {
+        if (timedOut) { _espNowRemoteBusy.value = false; _espNowRemoteError.value = "Timed out sending."; return }
+        val ack = com.hardwareone.console.ble.EspNowAck.parse(text)
+        if (ack == null) { _espNowRemoteBusy.value = false; _espNowRemoteError.value = "Bad reply."; return }
+        if (!ack.ok) { _espNowRemoteBusy.value = false; _espNowRemoteError.value = ack.error ?: "Failed."; return }
+        // Sent OK — page the peer's output in by reqId. The pull terminates on the empty
+        // {"messages":[]} page (handled in onEspNowFeedMessages); this watchdog is only a fallback
+        // for a peer that never answers at all (bad creds / unreachable): if nothing arrives after a
+        // quiet gap, clear the spinner and surface the error. Progress (new records) keeps it alive.
+        espNowRemoteReqId = ack.reqId
+        espNowRemoteLastProgressMs = android.os.SystemClock.elapsedRealtime()
+        pollEspNowFeed()
+        viewModelScope.launch {
+            while (_espNowRemoteBusy.value) {
+                kotlinx.coroutines.delay(1_000)
+                if (!_espNowRemoteBusy.value) break
+                if (android.os.SystemClock.elapsedRealtime() - espNowRemoteLastProgressMs > 5_000) {
+                    _espNowRemoteBusy.value = false
+                    if (_espNowRemoteResult.value == null) _espNowRemoteError.value = "No response from peer."
+                    break
+                }
+            }
+        }
+    }
+
+    fun clearEspNowRemote() {
+        _espNowRemoteBusy.value = false
+        _espNowRemoteError.value = null
+        _espNowRemoteResult.value = null
+        espNowRemoteReqId = 0L
+    }
+
+    // --- ESP-NOW management + this-device config (text setters; reload after) ---
+
+    fun unpairEspNow(mac: String) { if (connectionState.value is ConnectionState.Ready) ble.sendCommand("espnowunpair $mac") }
+    fun forgetEspNow(mac: String) { if (connectionState.value is ConnectionState.Ready) ble.sendCommand("espnowforget $mac") }
+    fun pairEspNow(mac: String, name: String, secure: Boolean) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCommand((if (secure) "espnowpairsecure " else "espnowpair ") + "$mac ${q(name)}")
+        viewModelScope.launch { kotlinx.coroutines.delay(500); refreshEspNowPeers() }
+    }
+
+    private fun espNowSetter(command: String) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCommand(command)
+        viewModelScope.launch { kotlinx.coroutines.delay(400); loadEspNow() }
+    }
+    fun setEspNowName(v: String) = espNowSetter("espnowsetname ${q(v)}")
+    fun setEspNowFriendlyName(v: String) = espNowSetter("espnowfriendlyname ${if (v.isEmpty()) "clear" else q(v)}")
+    fun setEspNowRoom(v: String) = espNowSetter("espnowroom ${if (v.isEmpty()) "clear" else q(v)}")
+    fun setEspNowZone(v: String) = espNowSetter("espnowzone ${if (v.isEmpty()) "clear" else q(v)}")
+    fun setEspNowTags(v: String) = espNowSetter("espnowtags ${if (v.isEmpty()) "clear" else q(v)}")
+    fun setEspNowStationary(on: Boolean) = espNowSetter("espnowstationary ${if (on) "1" else "0"}")
+    fun setEspNowMode(mode: String) = espNowSetter("espnowmode $mode")
+    fun setEspNowMeshRole(role: String) = espNowSetter("espnowmeshrole $role")
+    fun setEspNowEnabled(on: Boolean) = espNowSetter(if (on) "openespnow" else "closeespnow")
 
     // --- Sensors page ----------------------------------------------------------------
 
@@ -1276,5 +1422,6 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_EN_LIST = "enlist"
         const val TAG_EN_MESH = "enmesh"
         const val TAG_EN_MSGS = "enmsgs"
+        const val TAG_EN_REMOTE_ACK = "enremoteack"
     }
 }

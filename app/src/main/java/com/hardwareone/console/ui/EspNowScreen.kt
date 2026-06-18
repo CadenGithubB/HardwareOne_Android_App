@@ -48,6 +48,7 @@ fun EspNowScreen(
     loading: Boolean,
     onRefresh: () -> Unit,
     onOpenDevice: (mac: String, name: String) -> Unit,
+    onOpenConfig: () -> Unit,
 ) {
     val hw = LocalHwColors.current
     Box(modifier = Modifier.fillMaxSize().background(Brush.linearGradient(hw.gradient))) {
@@ -87,17 +88,20 @@ fun EspNowScreen(
                         }
                     }
 
-                    // This device's identity/metadata.
+                    // This device's identity/metadata — tap to configure.
                     deviceInfo?.let { d ->
                         if (d.error == null && (d.name.isNotEmpty() || d.mac.isNotEmpty())) {
-                            SectionCard("This device") {
-                                if (d.name.isNotEmpty()) InfoRow("Name", d.name)
-                                if (d.friendlyName.isNotEmpty()) InfoRow("Friendly name", d.friendlyName)
-                                if (d.room.isNotEmpty()) InfoRow("Room", d.room)
-                                if (d.zone.isNotEmpty()) InfoRow("Zone", d.zone)
-                                if (d.tags.isNotEmpty()) InfoRow("Tags", d.tags)
-                                if (d.stationary) InfoRow("Stationary", "yes")
-                                if (d.mac.isNotEmpty()) InfoRow("MAC", d.mac)
+                            Box(modifier = Modifier.clickable { onOpenConfig() }) {
+                                SectionCard("This device") {
+                                    if (d.name.isNotEmpty()) InfoRow("Name", d.name)
+                                    if (d.friendlyName.isNotEmpty()) InfoRow("Friendly name", d.friendlyName)
+                                    if (d.room.isNotEmpty()) InfoRow("Room", d.room)
+                                    if (d.zone.isNotEmpty()) InfoRow("Zone", d.zone)
+                                    if (d.tags.isNotEmpty()) InfoRow("Tags", d.tags)
+                                    if (d.stationary) InfoRow("Stationary", "yes")
+                                    if (d.mac.isNotEmpty()) InfoRow("MAC", d.mac)
+                                    InfoRow("", "Configure ›")
+                                }
                             }
                         }
                     }

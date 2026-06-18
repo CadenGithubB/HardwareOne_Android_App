@@ -111,6 +111,55 @@ class SecureChannel(private val psk: ByteArray) {
         return pt
     }
 
+    // --- Device→app message framing & reassembly (added with the BLE-reliability fix) ----------
+    //
+    // The device now prefixes each decrypted device→app frame with a 5-byte header:
+    //   [ver=0x01][msgId(2, little-endian)][fragIdx][fragCount][payload…]
+    // A complete message is the concatenated payloads of all `fragCount` fragments that share a
+    // `msgId`, in `fragIdx` order. `fragCount == 1` is the common single-frame case. A dropped
+    // frame leaves a msgId permanently incomplete — its partial is expired by [REASM_TTL_MS] and the
+    // caller's reply timeout re-requests the page (the device resends it under a fresh msgId).
+    // app→device is unchanged (still one unframed command per frame; we add no header outbound).
+
+    private class Reasm(val fragCount: Int, val startedMs: Long) {
+        val parts = arrayOfNulls<ByteArray>(fragCount)
+        var have = 0
+    }
+    private val reasm = HashMap<Int, Reasm>()
+
+    /**
+     * Parse one decrypted device→app frame and reassemble. Returns the complete message bytes once
+     * its last fragment arrives, else null (fragment buffered, or the frame is invalid/duplicate).
+     * [nowMs] is a monotonic clock used to expire partials whose missing fragment never arrives.
+     */
+    fun reassemble(plaintext: ByteArray, nowMs: Long): ByteArray? {
+        if (reasm.isNotEmpty()) reasm.values.removeAll { nowMs - it.startedMs > REASM_TTL_MS }
+
+        if (plaintext.size < FRAME_HEADER_LEN || plaintext[0] != FRAME_VER) return null
+        val msgId = (plaintext[1].toInt() and 0xff) or ((plaintext[2].toInt() and 0xff) shl 8)
+        val fragIdx = plaintext[3].toInt() and 0xff
+        val fragCount = plaintext[4].toInt() and 0xff
+        if (fragCount < 1 || fragIdx >= fragCount) return null
+        val payload = plaintext.copyOfRange(FRAME_HEADER_LEN, plaintext.size)
+        if (fragCount == 1) return payload // single-frame message — no buffering needed
+
+        var buf = reasm[msgId]
+        if (buf == null || buf.fragCount != fragCount) {
+            buf = Reasm(fragCount, nowMs).also { reasm[msgId] = it }
+        }
+        if (buf.parts[fragIdx] == null) { buf.parts[fragIdx] = payload; buf.have++ }
+        if (buf.have < fragCount) return null
+
+        reasm.remove(msgId)
+        val out = ByteArray(buf.parts.sumOf { it?.size ?: 0 })
+        var off = 0
+        for (p in buf.parts) {
+            p ?: return null
+            System.arraycopy(p, 0, out, off, p.size); off += p.size
+        }
+        return out
+    }
+
     private fun nonce(dir: Int, counter: Long): ByteArray = ByteArray(12).also { n ->
         n[0] = (dir ushr 24).toByte(); n[1] = (dir ushr 16).toByte()
         n[2] = (dir ushr 8).toByte(); n[3] = dir.toByte()
@@ -124,6 +173,11 @@ class SecureChannel(private val psk: ByteArray) {
         const val T_CONFIRM_ACK: Byte = 0x04
         const val T_REJECT: Byte = 0x05
         const val T_DATA: Byte = 0x10
+
+        // Device→app frame header: [ver][msgId lo][msgId hi][fragIdx][fragCount].
+        const val FRAME_VER: Byte = 0x01
+        private const val FRAME_HEADER_LEN = 5
+        private const val REASM_TTL_MS = 5_000L
 
         // SC_REJECT reason byte (payload[0]): the device is telling us why it won't open the
         // secure channel, instead of going silent and leaving the app to time out.

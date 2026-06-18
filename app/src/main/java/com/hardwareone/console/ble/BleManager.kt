@@ -529,10 +529,20 @@ class BleManager(context: Context) {
             handleHandshakeMessage(ch, value)
             return
         }
-        // Established: decrypt a DATA frame and stream it.
+        // Established: decrypt a DATA frame, then reassemble the device→app message it's a fragment
+        // of. A multi-frame message only surfaces once its last fragment arrives; a dropped frame
+        // leaves it incomplete (expired in SecureChannel), and the waiting capture's timeout re-asks.
         val pt = ch.decrypt(value)
         if (pt != null) {
-            appendSecureRx(String(pt, Charsets.UTF_8))
+            // Reassemble the framed device→app message this fragment belongs to (lockstep with the
+            // firmware framing); it surfaces only once its last fragment arrives.
+            val msg = ch.reassemble(pt, android.os.SystemClock.elapsedRealtime())
+            if (msg != null) {
+                val s = String(msg, Charsets.UTF_8)
+                // Terminate the message so appendSecureRx emits its final line now (each reassembled
+                // message is a complete unit — no cross-message buffering).
+                appendSecureRx(if (s.endsWith("\n")) s else s + "\n")
+            }
         } else {
             // Diagnostic: a RESPONSE we couldn't decrypt while secured. Distinguish a
             // plaintext leak (path A unencrypted) from a counter/tag mismatch.
@@ -650,12 +660,41 @@ class BleManager(context: Context) {
             return false
         }
         android.util.Log.d("HW1CAP", "claim tag=$captureTag text='${text.take(40)}'")
-        // Single-flush path (exactly one finishCapture per reply → no tag-shift race). Short
-        // quiet window keeps fast poll loops (LLM `llmresult`) responsive; in secure mode the
-        // capture already receives one complete reassembled line, so it's pure delay.
+        // Flush as soon as the captured buffer is a COMPLETE top-level JSON object. A large reply
+        // (e.g. a 20-record `espnowmessages` page) arrives as many fragments; on a busy device the
+        // gaps between them can exceed CAPTURE_QUIET_MS and prematurely flush a truncated object,
+        // dropping records. Completing on balanced braces makes large/bursty replies reliable, while
+        // the quiet window stays as the fallback (non-JSON replies, or fragments lost mid-flight).
         handler.removeCallbacks(captureQuietFlush)
-        handler.postDelayed(captureQuietFlush, CAPTURE_QUIET_MS)
+        val complete = synchronized(captureLock) { jsonComplete(captureBuf) }
+        if (complete) handler.post(captureQuietFlush)
+        else handler.postDelayed(captureQuietFlush, CAPTURE_QUIET_MS)
         return true
+    }
+
+    /** True once [sb] holds a complete, balanced top-level JSON value (braces/brackets matched,
+     *  not inside a string). Tolerates `{`/`}` appearing inside string values. */
+    private fun jsonComplete(sb: CharSequence): Boolean {
+        var depth = 0
+        var opened = false
+        var inStr = false
+        var esc = false
+        for (c in sb) {
+            if (inStr) {
+                when {
+                    esc -> esc = false
+                    c == '\\' -> esc = true
+                    c == '"' -> inStr = false
+                }
+            } else {
+                when (c) {
+                    '"' -> inStr = true
+                    '{', '[' -> { depth++; opened = true }
+                    '}', ']' -> depth--
+                }
+            }
+        }
+        return opened && depth == 0 && !inStr
     }
 
     private fun finishCapture(timedOut: Boolean) {
