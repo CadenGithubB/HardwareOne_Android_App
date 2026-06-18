@@ -158,6 +158,20 @@ private fun ChatBubble(line: EspNowChatLine) {
                 Text(line.from, color = hw.muted, style = MaterialTheme.typography.labelSmall)
             }
             Text(line.text, color = hw.onGradient, style = MaterialTheme.typography.bodyMedium)
+            if (line.outgoing && line.state >= 0) {
+                val label = when (line.state) {
+                    1 -> "delivered"
+                    2 -> "no ack"
+                    3 -> "failed"
+                    else -> "sending…"
+                }
+                Text(
+                    text = label,
+                    color = if (line.state == 2 || line.state == 3) hw.danger else hw.muted,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.align(Alignment.End),
+                )
+            }
         }
     }
 }

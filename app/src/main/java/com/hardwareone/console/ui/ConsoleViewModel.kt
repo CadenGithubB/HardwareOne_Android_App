@@ -161,11 +161,14 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private val _espNowLoading = MutableStateFlow(false)
     val espNowLoading: StateFlow<Boolean> = _espNowLoading.asStateFlow()
 
-    // Per-peer message feed (device detail screen): incoming messages + optimistic local echoes.
+    // Per-peer message feed (device detail screen). Raw records are accumulated (deduped by seq);
+    // the displayed lines are derived by reassembling chunked messages. Sent + received both come
+    // from shared device history, so there's no optimistic local echo to reconcile.
     private val _espNowFeed = MutableStateFlow<List<com.hardwareone.console.ble.EspNowChatLine>>(emptyList())
     val espNowFeed: StateFlow<List<com.hardwareone.console.ble.EspNowChatLine>> = _espNowFeed.asStateFlow()
     private var espNowFeedMac = ""
     private var espNowFeedSince = 0L
+    private val espNowRecords = LinkedHashMap<Long, com.hardwareone.console.ble.EspNowMessages.Message>()
 
     // --- Credential storage state ---
     /** Device can present a biometric/PIN prompt (a credential is enrolled). */
@@ -386,6 +389,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     fun openEspNowFeed(mac: String) {
         espNowFeedMac = mac
         espNowFeedSince = 0L
+        espNowRecords.clear()
         _espNowFeed.value = emptyList()
         pollEspNowFeed()
     }
@@ -396,30 +400,55 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         ble.sendCaptured("espnowmessages json $espNowFeedSince $espNowFeedMac", TAG_EN_MSGS)
     }
 
-    /** Send a text message to the peer (`espnowsend <mac> <message>`) with an optimistic echo. */
+    /** Send a text message to the peer (`espnowsend <mac> <message>`). The send is recorded in
+     *  shared device history, so it comes back through the feed (no optimistic echo to de-dupe). */
     fun sendEspNowMessage(mac: String, text: String) {
         if (connectionState.value !is ConnectionState.Ready || text.isBlank()) return
-        _espNowFeed.value = (_espNowFeed.value + com.hardwareone.console.ble.EspNowChatLine("me", text, true)).takeLast(200)
         ble.sendCommand("espnowsend $mac $text")
+        // Pull the just-recorded message in promptly rather than waiting for the next timer tick.
+        viewModelScope.launch { kotlinx.coroutines.delay(700); pollEspNowFeed() }
     }
 
     fun clearEspNowFeed() {
         espNowFeedMac = ""
         espNowFeedSince = 0L
+        espNowRecords.clear()
         _espNowFeed.value = emptyList()
     }
 
     private fun onEspNowFeedMessages(text: String) {
         val parsed = com.hardwareone.console.ble.EspNowMessages.parse(text) ?: return
         if (parsed.error != null || parsed.messages.isEmpty()) return
-        // The query filters to seq > since, but guard anyway; advance the cursor to the newest.
-        val fresh = parsed.messages.filter { it.seq > espNowFeedSince }
-        if (fresh.isEmpty()) return
-        espNowFeedSince = parsed.messages.maxOf { it.seq }
-        val lines = fresh.map {
-            com.hardwareone.console.ble.EspNowChatLine(it.name.ifEmpty { it.mac }, it.msg, false)
+        var changed = false
+        for (m in parsed.messages) {
+            if (m.seq > espNowFeedSince) espNowFeedSince = m.seq
+            if (espNowRecords.put(m.seq, m) == null) changed = true
         }
-        _espNowFeed.value = (_espNowFeed.value + lines).takeLast(200)
+        // Cap the raw buffer (keep the newest by seq).
+        if (espNowRecords.size > 300) {
+            espNowRecords.keys.sorted().take(espNowRecords.size - 300).forEach { espNowRecords.remove(it) }
+        }
+        if (changed) recomputeEspNowFeed()
+    }
+
+    /** Reassemble accumulated records into display lines: chunked messages (reqId != 0) are grouped
+     *  and concatenated in piece order; unsolicited messages (reqId 0) stand alone. */
+    private fun recomputeEspNowFeed() {
+        val groups = LinkedHashMap<String, MutableList<com.hardwareone.console.ble.EspNowMessages.Message>>()
+        for (m in espNowRecords.values.sortedBy { it.seq }) {
+            val key = if (m.reqId != 0L) "r${m.reqId}" else "s${m.seq}"
+            groups.getOrPut(key) { mutableListOf() }.add(m)
+        }
+        _espNowFeed.value = groups.values.map { group ->
+            val ordered = group.sortedBy { it.piece }
+            val first = ordered.first()
+            com.hardwareone.console.ble.EspNowChatLine(
+                from = first.name.ifEmpty { first.mac },
+                text = ordered.joinToString("") { it.msg },
+                outgoing = first.sent,
+                state = if (first.sent) first.sendState else -1,
+            )
+        }.takeLast(200)
     }
 
     // --- Sensors page ----------------------------------------------------------------

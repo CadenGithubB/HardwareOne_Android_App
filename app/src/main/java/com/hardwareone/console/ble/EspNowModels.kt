@@ -121,9 +121,26 @@ data class EspNowPaired(val devices: List<Device>, val error: String?) {
     }
 }
 
-/** `espnowmessages json [sinceSeq] [mac]` → buffered peer messages (and relayed results). */
+/**
+ * `espnowmessages json [sinceSeq] [mac]` → buffered peer messages (and relayed results).
+ *
+ * Bidirectional shared history: [Message.sent] gives direction. Long messages are CHUNKED into
+ * separate records that share a [Message.reqId] with [Message.piece]/[Message.of] — the client
+ * reassembles (group by reqId, order by piece, concat msg). [Message.sendState] is the durable
+ * delivery state of a sent record (0 pending, 1 delivered, 2 timeout, 3 failed).
+ */
 data class EspNowMessages(val messages: List<Message>, val error: String?) {
-    data class Message(val seq: Long, val mac: String, val name: String, val msg: String)
+    data class Message(
+        val seq: Long,
+        val reqId: Long,
+        val piece: Int,
+        val of: Int,
+        val mac: String,
+        val name: String,
+        val msg: String,
+        val sent: Boolean,
+        val sendState: Int,
+    )
 
     companion object {
         fun parse(json: String): EspNowMessages? {
@@ -133,7 +150,19 @@ data class EspNowMessages(val messages: List<Message>, val error: String?) {
                 o.optJSONArray("messages")?.let { arr ->
                     for (i in 0 until arr.length()) {
                         val m = arr.optJSONObject(i) ?: continue
-                        add(Message(m.optLong("seq"), m.optString("mac"), m.optString("name"), m.optString("msg")))
+                        add(
+                            Message(
+                                seq = m.optLong("seq"),
+                                reqId = m.optLong("reqId"),
+                                piece = m.optInt("piece", 1),
+                                of = m.optInt("of", 1),
+                                mac = m.optString("mac"),
+                                name = m.optString("name"),
+                                msg = m.optString("msg"),
+                                sent = m.optBoolean("sent"),
+                                sendState = m.optInt("sendState"),
+                            ),
+                        )
                     }
                 }
             }
@@ -142,8 +171,11 @@ data class EspNowMessages(val messages: List<Message>, val error: String?) {
     }
 }
 
-/** One line in a peer's message feed (incoming from the device, or an optimistic local echo). */
-data class EspNowChatLine(val from: String, val text: String, val outgoing: Boolean)
+/**
+ * One reassembled line in a peer's message feed. [state] is the sent record's delivery state
+ * (0 pending / 1 delivered / 2 timeout / 3 failed) for outgoing lines, or -1 for received.
+ */
+data class EspNowChatLine(val from: String, val text: String, val outgoing: Boolean, val state: Int = -1)
 
 /** `espnowmeshstatus json` → live mesh peers + discovered (unpaired) devices. */
 data class EspNowMeshStatus(
