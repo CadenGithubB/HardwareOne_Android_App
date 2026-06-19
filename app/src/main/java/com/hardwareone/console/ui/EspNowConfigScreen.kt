@@ -128,7 +128,7 @@ internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> U
 }
 
 @Composable
-private fun ChipRow(options: List<String>, selected: String, onSelect: (String) -> Unit) {
+internal fun ChipRow(options: List<String>, selected: String, onSelect: (String) -> Unit) {
     val hw = LocalHwColors.current
     Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         options.forEach { opt ->

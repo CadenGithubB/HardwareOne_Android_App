@@ -155,8 +155,39 @@ data class SensorSnapshot(
                 .split(" ")
                 .filter { it.isNotEmpty() }
                 .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+
+        /**
+         * Parse a per-sensor `<x>read json` reply. Unlike [parse], the reply is the bare *data*
+         * object (the same shape that appears in a sensor's `data` field), not wrapped in an entry.
+         * Returns null if the reply isn't JSON — e.g. a feature-compiled-out "Unknown command" — so
+         * the caller can skip it. Check [ReadData.valid] (false = stale/unavailable).
+         */
+        fun parseReadData(json: String): ReadData? {
+            val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
+            val numbers = HashMap<String, Double>()
+            val flags = HashMap<String, Boolean>()
+            val keys = o.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                when (val v = o.opt(k)) {
+                    is Boolean -> flags[k] = v
+                    is Int -> numbers[k] = v.toDouble()
+                    is Long -> numbers[k] = v.toDouble()
+                    is Double -> numbers[k] = v
+                }
+            }
+            return ReadData(o.optBoolean("valid", true), buildReadings(o), numbers, flags)
+        }
     }
 }
+
+/** Parsed `<x>read json` data for one sensor (see [SensorSnapshot.parseReadData]). */
+data class ReadData(
+    val valid: Boolean,
+    val readings: List<ReadingNode>,
+    val numbers: Map<String, Double>,
+    val flags: Map<String, Boolean>,
+)
 
 data class SensorEntry(
     val id: String,

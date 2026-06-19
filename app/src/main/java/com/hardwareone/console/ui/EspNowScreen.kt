@@ -49,6 +49,7 @@ fun EspNowScreen(
     onRefresh: () -> Unit,
     onOpenDevice: (mac: String, name: String) -> Unit,
     onOpenConfig: () -> Unit,
+    onOpenBond: () -> Unit,
 ) {
     val hw = LocalHwColors.current
     Box(modifier = Modifier.fillMaxSize().background(Brush.linearGradient(hw.gradient))) {
@@ -106,6 +107,13 @@ fun EspNowScreen(
                                     InfoRow("", "Configure ›")
                                 }
                             }
+                        }
+                    }
+
+                    // Bond — this device + its bonded peer (bondstatus json). Tap to open.
+                    Box(modifier = Modifier.clickable { onOpenBond() }) {
+                        SectionCard("Bond") {
+                            InfoRow("", "This device + bonded peer ›")
                         }
                     }
 

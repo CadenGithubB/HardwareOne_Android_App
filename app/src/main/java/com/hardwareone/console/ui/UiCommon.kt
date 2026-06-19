@@ -82,6 +82,7 @@ class HeaderNav(
     val onOpenLlm: (() -> Unit)? = null,
     val onOpenFiles: (() -> Unit)? = null,
     val onOpenEspNow: (() -> Unit)? = null,
+    val onOpenAutomations: (() -> Unit)? = null,
     val onSyncClock: (() -> Unit)? = null,
     val onSaveLog: (() -> Unit)? = null,
     val onClearLog: (() -> Unit)? = null,
@@ -158,6 +159,7 @@ fun PageToggle(nav: HeaderNav) {
                     nav.onOpenLlm?.let { go -> DropdownMenuItem(text = { Text("LLM Chat") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenFiles?.let { go -> DropdownMenuItem(text = { Text("Files") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenEspNow?.let { go -> DropdownMenuItem(text = { Text("ESP-NOW") }, onClick = { devMenu = false; go() }) }
+                    nav.onOpenAutomations?.let { go -> DropdownMenuItem(text = { Text("Automations") }, onClick = { devMenu = false; go() }) }
                     nav.onSyncClock?.let { go -> DropdownMenuItem(text = { Text("Sync clock") }, onClick = { devMenu = false; go() }) }
                 }
             } else {

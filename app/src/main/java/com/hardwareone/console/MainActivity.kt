@@ -39,6 +39,8 @@ import com.hardwareone.console.ui.ConsoleViewModel
 import com.hardwareone.console.ui.DevicesScreen
 import com.hardwareone.console.ui.EspNowConfigScreen
 import com.hardwareone.console.ui.EspNowDeviceScreen
+import com.hardwareone.console.ui.AutomationsScreen
+import com.hardwareone.console.ui.EspNowBondScreen
 import com.hardwareone.console.ui.EspNowScreen
 import com.hardwareone.console.ui.FilesScreen
 import com.hardwareone.console.ui.HeaderNav
@@ -83,7 +85,9 @@ class MainActivity : FragmentActivity() {
         data object LlmChat : Screen
         data object Files : Screen
         data object EspNow : Screen
+        data object Automations : Screen
         data object EspNowConfig : Screen
+        data object EspNowBond : Screen
         data class EspNowDevice(val mac: String, val name: String) : Screen
         data object SavedLogs : Screen
         data class Viewer(val fileName: String, val title: String, val text: String) : Screen
@@ -177,6 +181,7 @@ class MainActivity : FragmentActivity() {
                         Screen.LlmChat -> "LLM Chat"
                         Screen.Files -> "Files"
                         Screen.EspNow -> "ESP-NOW"
+                        Screen.Automations -> "Automations"
                         else -> "Devices"
                     },
                     onOpenDevices = onOpenDevices,
@@ -185,6 +190,7 @@ class MainActivity : FragmentActivity() {
                     onOpenLlm = ({ openTool(Screen.LlmChat) }).takeIf { current != Screen.LlmChat },
                     onOpenFiles = ({ vm.loadFiles("/"); openTool(Screen.Files) }).takeIf { current != Screen.Files },
                     onOpenEspNow = ({ openTool(Screen.EspNow) }).takeIf { current != Screen.EspNow },
+                    onOpenAutomations = ({ vm.loadAutomations(); openTool(Screen.Automations) }).takeIf { current != Screen.Automations },
                     onSyncClock = vm::syncClock,
                     onSaveLog = onSaveLog,
                     onClearLog = onClearLog,
@@ -399,6 +405,33 @@ class MainActivity : FragmentActivity() {
                             onRefresh = vm::loadEspNow,
                             onOpenDevice = { mac, name -> navTo(Screen.EspNowDevice(mac, name)) },
                             onOpenConfig = { navTo(Screen.EspNowConfig) },
+                            onOpenBond = { vm.loadEspNowBond(); navTo(Screen.EspNowBond) },
+                        )
+                    }
+
+                    Screen.EspNowBond -> {
+                        val bond by vm.espNowBond.collectAsState()
+                        LaunchedEffect(Unit) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                vm.loadEspNowBond()
+                                while (true) { kotlinx.coroutines.delay(4_000); vm.loadEspNowBond() }
+                            }
+                        }
+                        EspNowBondScreen(
+                            bond = bond,
+                            onSwapRoles = { vm.swapBondRoles() },
+                            onConnect = { bond?.peer?.let { p -> vm.bondConnect(p) } },
+                            onDisconnect = { vm.bondDisconnect() },
+                            onResync = { vm.bondResync() },
+                            onBack = { navBack() },
+                        )
+                    }
+
+                    Screen.Automations -> {
+                        LaunchedEffect(Unit) { vm.loadAutomations() }
+                        AutomationsScreen(
+                            vm = vm,
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Automations),
                         )
                     }
 

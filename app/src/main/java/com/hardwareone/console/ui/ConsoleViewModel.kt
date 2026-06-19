@@ -16,6 +16,7 @@ import com.hardwareone.console.security.SecureChannel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.crypto.Cipher
@@ -160,6 +161,18 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     val espNowMesh: StateFlow<com.hardwareone.console.ble.EspNowMeshStatus?> = _espNowMesh.asStateFlow()
     private val _espNowDevices = MutableStateFlow<com.hardwareone.console.ble.EspNowMeshDevices?>(null)
     val espNowDevices: StateFlow<com.hardwareone.console.ble.EspNowMeshDevices?> = _espNowDevices.asStateFlow()
+    private val _espNowBond = MutableStateFlow<com.hardwareone.console.ble.EspNowBond?>(null)
+    val espNowBond: StateFlow<com.hardwareone.console.ble.EspNowBond?> = _espNowBond.asStateFlow()
+
+    // --- Automations (device-level; `automationlist json` + control verbs) ---
+    private val _automations = MutableStateFlow<com.hardwareone.console.ble.AutomationList?>(null)
+    val automations: StateFlow<com.hardwareone.console.ble.AutomationList?> = _automations.asStateFlow()
+    private val _automationsBusy = MutableStateFlow(false)
+    val automationsBusy: StateFlow<Boolean> = _automationsBusy.asStateFlow()
+    private val _automationsSystemOn = MutableStateFlow<Boolean?>(null) // global enable; null = unknown
+    val automationsSystemOn: StateFlow<Boolean?> = _automationsSystemOn.asStateFlow()
+    private val _automationStatus = MutableStateFlow<String?>(null) // transient run result (error shown)
+    val automationStatus: StateFlow<String?> = _automationStatus.asStateFlow()
     private val _espNowLoading = MutableStateFlow(false)
     val espNowLoading: StateFlow<Boolean> = _espNowLoading.asStateFlow()
 
@@ -280,6 +293,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_STATUS -> onStatusCapture(capture.text, capture.timedOut)
                         tag == TAG_DEVICES -> onDevicesCapture(capture.text, capture.timedOut)
                         tag == TAG_SENSORS -> onSensorsCapture(capture.text, capture.timedOut)
+                        tag.startsWith(TAG_SENSOR_READ) -> onSensorRead(tag.removePrefix(TAG_SENSOR_READ), capture.text, capture.timedOut)
                         tag == TAG_CONTROL_MODULES -> onControlModulesCapture(capture.text)
                         tag == TAG_BATTERY -> onBatteryCapture(capture.text, capture.timedOut)
                         tag == TAG_LLM_STATUS -> onLlmStatusCapture(capture.text)
@@ -297,6 +311,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_EN_LIST -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowPaired.parse(capture.text)?.let { _espNowPaired.value = it } }
                         tag == TAG_EN_MESH -> { _espNowLoading.value = false; if (!capture.timedOut) com.hardwareone.console.ble.EspNowMeshStatus.parse(capture.text)?.let { _espNowMesh.value = it } }
                         tag == TAG_EN_DEVICES -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowMeshDevices.parse(capture.text)?.let { _espNowDevices.value = it } }
+                        tag == TAG_EN_BOND -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowBond.parse(capture.text)?.let { _espNowBond.value = it } }
+                        tag == TAG_AUTOMATIONS -> { _automationsBusy.value = false; if (!capture.timedOut) com.hardwareone.console.ble.AutomationList.parse(capture.text)?.let { _automations.value = it } }
+                        tag == TAG_AUTOMATION_SYS -> {
+                            // `automation system status|enable|disable json` → {"schema":1,"enabled":bool}.
+                            if (!capture.timedOut) runCatching { org.json.JSONObject(capture.text) }.getOrNull()
+                                ?.takeIf { it.has("enabled") }?.let { _automationsSystemOn.value = it.optBoolean("enabled") }
+                        }
                         tag == TAG_EN_MSGS -> onEspNowFeedMessages(capture.text, capture.timedOut)
                         tag == TAG_EN_REMOTE_ACK -> onEspNowRemoteAck(capture.text, capture.timedOut)
                         tag == TAG_EN_FILES_ACK -> onEspNowFilesAck(capture.text, capture.timedOut)
@@ -419,6 +440,45 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         ble.sendCaptured("espnowdevices json", TAG_EN_DEVICES)
     }
 
+    // --- ESP-NOW bond (this device + its bonded peer, from `bondstatus json`) ---
+
+    /** Load bond status (`bondstatus json`) — reports both sides from the gateway's live view. */
+    fun loadEspNowBond() {
+        if (connectionState.value is ConnectionState.Ready) ble.sendCaptured("bondstatus json", TAG_EN_BOND)
+    }
+
+    private fun bondCmdThenReload(cmd: String) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCommand(cmd)
+        viewModelScope.launch { kotlinx.coroutines.delay(1_000); loadEspNowBond() }
+    }
+
+    fun bondConnect(peer: String) { if (peer.isNotEmpty()) bondCmdThenReload("bondconnect $peer") }
+    fun bondDisconnect() = bondCmdThenReload("bonddisconnect")
+    fun bondResync() = bondCmdThenReload("bondresync")
+
+    /**
+     * Swap master/worker on BOTH devices (mirrors the web's bond role swap). Flip the PEER first via
+     * the bond session (`remote:bondrole …`, routed to the bonded device, no creds), then flip
+     * locally — the order matters: doing local first races the handshake (worker would send CAP_REQ
+     * before the peer became master). Fire-and-forget like the web's per-step commands, then reload.
+     */
+    fun swapBondRoles() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        val cur = _espNowBond.value ?: return
+        if (!cur.enabled) return
+        val localMaster = cur.role == "master"
+        val peerNew = if (localMaster) "master" else "worker"
+        val localNew = if (localMaster) "worker" else "master"
+        viewModelScope.launch {
+            ble.sendCommand("remote:bondrole $peerNew") // peer first (avoids the handshake race)
+            kotlinx.coroutines.delay(700)
+            ble.sendCommand("bondrole $localNew")        // then local
+            kotlinx.coroutines.delay(1_200)
+            loadEspNowBond()
+        }
+    }
+
     /** Sync a peer's metadata like the web's "Sync Metadata" button: force a fresh pull with
      *  `espnowrequestmeta <mac>`, then re-read the cache a few times as the peer's reply lands
      *  (the cache is stale/partial until the peer pushes — that's why a plain read shows old fields). */
@@ -469,6 +529,52 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _espNowMesh.value = null
         _espNowDevices.value = null
         _espNowLoading.value = false
+    }
+
+    // --- Automations (read + control; the create/edit builder is a future tier) ---
+
+    /** Load the automation list (`automationlist json`) + the global on/off (`automation system status`). */
+    fun loadAutomations() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        _automationsBusy.value = true
+        ble.sendCaptured("automation system status json", TAG_AUTOMATION_SYS) // {"schema":1,"enabled":bool}
+        ble.sendCaptured("automationlist json", TAG_AUTOMATIONS) // sent last → clears busy
+    }
+
+    private fun reloadAutomationsSoon() {
+        viewModelScope.launch { kotlinx.coroutines.delay(500); loadAutomations() }
+    }
+
+    /** Run now. `automationrun id=` replies text ("OK" / "Error: …"), which the JSON capture can't
+     *  claim — so grab the first OK/Error line off the incoming stream, scoped to right after the
+     *  send, and surface a failure message (e.g. "automation not found"). */
+    fun runAutomation(id: Long) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        _automationStatus.value = "Running…"
+        viewModelScope.launch {
+            ble.sendCommand("automationrun id=$id")
+            val line = kotlinx.coroutines.withTimeoutOrNull(2500L) {
+                ble.incoming.first { val t = it.trim(); t == "OK" || t.startsWith("Error:") }
+            }?.trim()
+            _automationStatus.value = if (line != null && line.startsWith("Error:")) line else null
+            loadAutomations()
+        }
+    }
+    fun triggerAutomation(id: Long) { sendAutomationCmd("automationtrigger id=$id") }
+    fun setAutomationEnabled(id: Long, on: Boolean) {
+        sendAutomationCmd("automation ${if (on) "enable" else "disable"} id=$id"); reloadAutomationsSoon()
+    }
+    fun deleteAutomation(id: Long) { sendAutomationCmd("automation delete id=$id"); reloadAutomationsSoon() }
+    fun setAutomationsSystem(on: Boolean) {
+        // `… enable json` / `… disable json` apply AND return {"enabled":…} — one round trip, the
+        // capture reply updates the toggle (no separate status re-read needed).
+        if (connectionState.value is ConnectionState.Ready) {
+            ble.sendCaptured("automation system ${if (on) "enable" else "disable"} json", TAG_AUTOMATION_SYS)
+        }
+    }
+
+    private fun sendAutomationCmd(cmd: String) {
+        if (connectionState.value is ConnectionState.Ready) ble.sendCommand(cmd)
     }
 
     // --- ESP-NOW per-peer message feed (device detail screen) ---
@@ -850,14 +956,45 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- Sensors page ----------------------------------------------------------------
 
-    /** Poll the sensor snapshot (`sensors json`), captured off-console. */
+    /**
+     * Refresh sensors. Over BLE the aggregate `sensors json` can exceed the ~2 KB result ceiling
+     * and truncate, so we use the firmware's brief enumeration (`sensors json brief` — state only,
+     * bounded) to discover what's live, then pull each live sensor's reading individually via its
+     * `<x>read json` (each well under the ceiling). Readings fill in as they arrive.
+     */
     fun refreshSensors() {
         if (connectionState.value !is ConnectionState.Ready) {
             _sensorsError.value = "Not connected."
             return
         }
         _sensorsLoading.value = true
-        ble.sendCaptured("sensors json", TAG_SENSORS)
+        ble.sendCaptured("sensors json brief", TAG_SENSORS)
+    }
+
+    /** id → per-sensor `<x>read json` command (firmware sensor contract). */
+    private fun sensorReadCommand(id: String): String? = when (id) {
+        "imu" -> "imuread json"
+        "tof" -> "tofread json"
+        "gps" -> "gpsread json"
+        "presence" -> "presenceread json"
+        "fmradio" -> "fmradioread json"
+        "rtc" -> "rtcread json"
+        "input" -> "gamepadread json"
+        "apds" -> "apdsread json"
+        "thermal" -> "thermalread json"
+        "mic" -> "micread json"
+        "anoencoder" -> "anoencoderread json"
+        else -> null
+    }
+
+    /** Merge a per-sensor `<x>read json` reply into its entry; skip non-JSON (e.g. "Unknown command"). */
+    private fun onSensorRead(id: String, text: String, timedOut: Boolean) {
+        if (timedOut) return
+        val rd = com.hardwareone.console.ble.SensorSnapshot.parseReadData(text) ?: return
+        _sensors.value = _sensors.value?.map { e ->
+            if (e.id != id) e
+            else e.copy(hasData = true, dataValid = rd.valid, readings = rd.readings, numbers = rd.numbers, flags = rd.flags)
+        }
     }
 
     /** Drop the cached snapshot (call when leaving the page). */
@@ -915,8 +1052,27 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
-        _sensors.value = snapshot.sensors
+        // Merge the brief (state-only) into the previous snapshot so existing readings stay on
+        // screen through a refresh and update in place when each per-sensor read lands — instead of
+        // flashing "No readings yet". Carry old data over only when the brief itself didn't inline it.
+        val prev = _sensors.value
+        _sensors.value = snapshot.sensors.map { fresh ->
+            if (fresh.hasData) return@map fresh
+            val old = prev?.firstOrNull { it.id == fresh.id && it.hasData } ?: return@map fresh
+            fresh.copy(
+                hasData = true, dataValid = old.dataValid,
+                readings = old.readings, numbers = old.numbers, flags = old.flags,
+            )
+        }
         _sensorsError.value = null
+        // Pull each live sensor's reading individually (the aggregate truncates over BLE). Fan out by
+        // the FRESH brief state (pre-carry-over !hasData) so carried-over placeholders still re-fetch;
+        // an old firmware that inlines data in the brief isn't re-fetched redundantly.
+        for (e in snapshot.sensors) {
+            if (e.connected && e.enabled && !e.hasData) {
+                sensorReadCommand(e.id)?.let { ble.sendCaptured(it, TAG_SENSOR_READ + e.id) }
+            }
+        }
     }
 
     // --- Per-sensor controls (`controls json`) ---------------------------------------
@@ -1654,6 +1810,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_STATUS = "status"
         const val TAG_DEVICES = "devices"
         const val TAG_SENSORS = "sensors"
+        const val TAG_SENSOR_READ = "sread:"
         const val TAG_CONTROL_MODULES = "controlmods"
         const val TAG_CONTROLS_PREFIX = "controls:"
         const val TAG_BATTERY = "battery"
@@ -1673,6 +1830,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_EN_LIST = "enlist"
         const val TAG_EN_MESH = "enmesh"
         const val TAG_EN_DEVICES = "endevices"
+        const val TAG_EN_BOND = "enbond"
+        const val TAG_AUTOMATIONS = "autos"
+        const val TAG_AUTOMATION_SYS = "autosys"
         const val TAG_EN_MSGS = "enmsgs"
         const val TAG_EN_REMOTE_ACK = "enremoteack"
         const val TAG_EN_FILES_ACK = "enfilesack"

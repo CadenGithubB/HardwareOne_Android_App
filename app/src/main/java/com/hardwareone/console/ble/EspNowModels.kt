@@ -302,3 +302,51 @@ data class EspNowMeshStatus(
         }
     }
 }
+
+/** `bondstatus json` → the bonded-pair status from the BLE-connected device's view (it tracks the
+ *  peer live via the bond heartbeat). Covers BOTH sides: this device's [role] + the bonded [peer]. */
+data class EspNowBond(
+    val enabled: Boolean,
+    val role: String,            // THIS device: "master" | "worker"
+    val peer: String,            // peer MAC (empty when disabled)
+    val peerName: String,
+    val online: Boolean,
+    val syncState: String,       // "offline" | "syncing" | "synced"
+    val syncCap: Boolean,
+    val syncManifest: Boolean,
+    val syncSettingsRx: Boolean,
+    val syncSettingsTx: Boolean,
+    val heartbeatsSent: Long,
+    val heartbeatsReceived: Long,
+    val lastHeartbeatAgoSec: Long,
+    val error: String?,
+) {
+    /** The peer's role is the opposite of ours (bond is master↔worker). */
+    val peerRole: String get() = when (role) { "master" -> "worker"; "worker" -> "master"; else -> "" }
+
+    companion object {
+        fun parse(json: String): EspNowBond? {
+            val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
+            errorOf(o)?.let {
+                return EspNowBond(false, "", "", "", false, "", false, false, false, false, 0, 0, 0, it)
+            }
+            val sync = o.optJSONObject("sync")
+            return EspNowBond(
+                enabled = o.optBoolean("enabled"),
+                role = o.optString("role"),
+                peer = o.optString("peer"),
+                peerName = o.optString("peerName"),
+                online = o.optBoolean("online"),
+                syncState = o.optString("syncState"),
+                syncCap = sync?.optBoolean("cap") ?: false,
+                syncManifest = sync?.optBoolean("manifest") ?: false,
+                syncSettingsRx = sync?.optBoolean("settingsRx") ?: false,
+                syncSettingsTx = sync?.optBoolean("settingsTx") ?: false,
+                heartbeatsSent = o.optLong("heartbeatsSent"),
+                heartbeatsReceived = o.optLong("heartbeatsReceived"),
+                lastHeartbeatAgoSec = o.optLong("lastHeartbeatAgo"),
+                error = null,
+            )
+        }
+    }
+}
