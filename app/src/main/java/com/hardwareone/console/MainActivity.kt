@@ -439,12 +439,21 @@ class MainActivity : FragmentActivity() {
                         val rBusy by vm.espNowRemoteBusy.collectAsState()
                         val rError by vm.espNowRemoteError.collectAsState()
                         val rResult by vm.espNowRemoteResult.collectAsState()
+                        val fPath by vm.espNowFilesPath.collectAsState()
+                        val fListing by vm.espNowFilesListing.collectAsState()
+                        val fBusy by vm.espNowFilesBusy.collectAsState()
+                        val fError by vm.espNowFilesError.collectAsState()
+                        val fetchBusy by vm.espNowFetchBusy.collectAsState()
+                        val fetchStatus by vm.espNowFetchStatus.collectAsState()
+                        val enDevices by vm.espNowDevices.collectAsState()
+                        val meta = enDevices?.devices?.firstOrNull { it.mac.equals(screen.mac, ignoreCase = true) }
                         LaunchedEffect(screen.mac) {
                             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                                 // The VM self-drives a reply-driven forward-paging loop (one request
                                 // in flight; next page fires only after the previous reply lands), so
                                 // there's no timer here that could queue redundant re-fetches.
                                 vm.openEspNowFeed(screen.mac)
+                                vm.syncEspNowPeerMeta(screen.mac) // force-pull the peer's metadata, then read
                                 try {
                                     kotlinx.coroutines.awaitCancellation()
                                 } finally {
@@ -462,6 +471,19 @@ class MainActivity : FragmentActivity() {
                             remoteError = rError,
                             remoteResult = rResult,
                             onRunCommand = { user, pass, cmd -> vm.runEspNowRemote(screen.mac, user, pass, cmd) },
+                            filesPath = fPath,
+                            filesListing = fListing,
+                            filesBusy = fBusy,
+                            filesError = fError,
+                            fetchBusy = fetchBusy,
+                            fetchStatus = fetchStatus,
+                            onBrowseFiles = { user, pass, path -> vm.browseEspNowFiles(screen.mac, user, pass, path) },
+                            onOpenDir = { name -> vm.openEspNowDir(screen.mac, name) },
+                            onFilesUp = { vm.espNowFilesUp(screen.mac) },
+                            onFetchFile = { name -> vm.fetchEspNowFile(screen.mac, name) },
+                            metadata = meta,
+                            onRefreshMeta = { vm.syncEspNowPeerMeta(screen.mac) },
+                            onSaveMeta = { u, p, field, v -> vm.editEspNowPeerMeta(screen.mac, u, p, field, v) },
                             onUnpair = { vm.unpairEspNow(screen.mac); vm.clearEspNowFeed(); navBack(); vm.refreshEspNowPeers() },
                             onForget = { vm.forgetEspNow(screen.mac); vm.clearEspNowFeed(); navBack(); vm.refreshEspNowPeers() },
                             onBack = { vm.clearEspNowFeed(); navBack() },

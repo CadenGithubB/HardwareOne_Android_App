@@ -66,7 +66,10 @@ fun EspNowScreen(
                             if (m.error != null) {
                                 InfoRow("Status", m.error)
                             } else {
-                                InfoRow("Enabled", yn(m.enabled))
+                                // "Enabled" = live running state (espnowencstatus.running), NOT
+                                // espnowmode.enabled (the persistent boot setting), which reads false
+                                // when ESP-NOW was started at runtime. Matches the Configure page.
+                                InfoRow("Enabled", yn(enc?.running == true))
                                 if (m.mode.isNotEmpty()) InfoRow("Mode", m.mode)
                             }
                         }

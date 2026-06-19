@@ -112,7 +112,7 @@ fun EspNowConfigScreen(
 }
 
 @Composable
-private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     val hw = LocalHwColors.current
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = hw.onGradient, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
@@ -148,7 +148,7 @@ private fun ChipRow(options: List<String>, selected: String, onSelect: (String) 
 }
 
 @Composable
-private fun EditRow(label: String, initial: String, onSave: (String) -> Unit) {
+internal fun EditRow(label: String, initial: String, onSave: (String) -> Unit) {
     val hw = LocalHwColors.current
     var text by remember(initial) { mutableStateOf(initial) }
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

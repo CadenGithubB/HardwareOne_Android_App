@@ -121,6 +121,54 @@ data class EspNowPaired(val devices: List<Device>, val error: String?) {
     }
 }
 
+/** `espnowdevices json` → mesh peers with smart-home metadata + liveness (the gateway's cached
+ *  `gMeshPeerMeta`). Same per-peer record the web's `/api/espnow/metadata` serves. */
+data class EspNowMeshDevices(val devices: List<Device>, val error: String?) {
+    data class Device(
+        val mac: String,
+        val deviceName: String,
+        val friendlyName: String,
+        val room: String,
+        val zone: String,
+        val tags: String,
+        val stationary: Boolean,
+        val online: Boolean,
+        val lastSeenSec: Long,
+        val source: String,
+    ) {
+        /** Best display label: friendly name → device name → MAC. */
+        val label: String get() = friendlyName.ifEmpty { deviceName.ifEmpty { mac } }
+    }
+
+    companion object {
+        fun parse(json: String): EspNowMeshDevices? {
+            val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
+            errorOf(o)?.let { return EspNowMeshDevices(emptyList(), it) }
+            val arr = o.optJSONArray("devices")
+            val list = buildList {
+                if (arr != null) for (i in 0 until arr.length()) {
+                    val d = arr.optJSONObject(i) ?: continue
+                    add(
+                        Device(
+                            mac = d.optString("mac"),
+                            deviceName = d.optString("deviceName"),
+                            friendlyName = d.optString("friendlyName"),
+                            room = d.optString("room"),
+                            zone = d.optString("zone"),
+                            tags = d.optString("tags"),
+                            stationary = d.optBoolean("stationary"),
+                            online = d.optBoolean("online"),
+                            lastSeenSec = d.optLong("lastSeenSec"),
+                            source = d.optString("source"),
+                        ),
+                    )
+                }
+            }
+            return EspNowMeshDevices(list, null)
+        }
+    }
+}
+
 /**
  * `espnowmessages json [sinceSeq] [mac]` → buffered peer messages (and relayed results).
  *
@@ -140,6 +188,9 @@ data class EspNowMessages(val messages: List<Message>, val error: String?) {
         val msg: String,
         val sent: Boolean,
         val sendState: Int,
+        /** Record type: 0=text, 1=file-send-start, 2=send-success, 3=send-failed,
+         *  4=file-recv-success, 5=recv-failed. */
+        val type: Int,
     )
 
     companion object {
@@ -161,6 +212,7 @@ data class EspNowMessages(val messages: List<Message>, val error: String?) {
                                 msg = m.optString("msg"),
                                 sent = m.optBoolean("sent"),
                                 sendState = m.optInt("sendState"),
+                                type = m.optInt("type"),
                             ),
                         )
                     }

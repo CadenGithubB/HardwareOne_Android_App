@@ -158,6 +158,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     val espNowPaired: StateFlow<com.hardwareone.console.ble.EspNowPaired?> = _espNowPaired.asStateFlow()
     private val _espNowMesh = MutableStateFlow<com.hardwareone.console.ble.EspNowMeshStatus?>(null)
     val espNowMesh: StateFlow<com.hardwareone.console.ble.EspNowMeshStatus?> = _espNowMesh.asStateFlow()
+    private val _espNowDevices = MutableStateFlow<com.hardwareone.console.ble.EspNowMeshDevices?>(null)
+    val espNowDevices: StateFlow<com.hardwareone.console.ble.EspNowMeshDevices?> = _espNowDevices.asStateFlow()
     private val _espNowLoading = MutableStateFlow(false)
     val espNowLoading: StateFlow<Boolean> = _espNowLoading.asStateFlow()
 
@@ -170,6 +172,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private var espNowFeedSince = 0L
     private var espNowFeedActive = false   // drain loop runs while the device screen is RESUMED
     private var espNowPollInFlight = false // at most ONE espnowmessages request outstanding
+    private var espNowFeedEpoch = 0L       // bumped each open; invalidates a prior open's in-flight reply
+    private var espNowInFlightEpoch = 0L   // epoch the outstanding request was issued under
     private val espNowRecords = LinkedHashMap<Long, com.hardwareone.console.ble.EspNowMessages.Message>()
 
     // Remote command runner (device detail → Command tab).
@@ -181,6 +185,32 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     val espNowRemoteResult: StateFlow<String?> = _espNowRemoteResult.asStateFlow()
     private var espNowRemoteReqId = 0L
     private var espNowRemoteLastProgressMs = 0L
+
+    // --- ESP-NOW remote file browser (peer's files via `espnowremote <mac> <user> <pass> files json`) ---
+    // The peer runs the SAME `files json` builder as local, so the result parses with the local
+    // FileListing parser and renders with the local Files UI. The JSON streams back through the
+    // espnowmessages feed reqId-matched (same path as a remote command), assembled on the empty page.
+    private val _espNowFilesListing = MutableStateFlow<com.hardwareone.console.ble.FileListing?>(null)
+    val espNowFilesListing: StateFlow<com.hardwareone.console.ble.FileListing?> = _espNowFilesListing.asStateFlow()
+    private val _espNowFilesPath = MutableStateFlow("/")
+    val espNowFilesPath: StateFlow<String> = _espNowFilesPath.asStateFlow()
+    private val _espNowFilesBusy = MutableStateFlow(false)
+    val espNowFilesBusy: StateFlow<Boolean> = _espNowFilesBusy.asStateFlow()
+    private val _espNowFilesError = MutableStateFlow<String?>(null)
+    val espNowFilesError: StateFlow<String?> = _espNowFilesError.asStateFlow()
+    private var espNowFilesReqId = 0L
+    private var espNowFilesUser = ""
+    private var espNowFilesPass = ""
+
+    // Fetch a peer file onto THIS (gateway) device (`espnowfetch`). The transfer lands at
+    // /espnow/received/<peerMacToken>/<name>. Completion is the terminal type:4 (recv-success) /
+    // type:5 (recv-failed) feed record — NOT reqId-matched, so we correlate by peer + filename.
+    private val _espNowFetchBusy = MutableStateFlow(false)
+    val espNowFetchBusy: StateFlow<Boolean> = _espNowFetchBusy.asStateFlow()
+    private val _espNowFetchStatus = MutableStateFlow<String?>(null)
+    val espNowFetchStatus: StateFlow<String?> = _espNowFetchStatus.asStateFlow()
+    private var espNowFetchTarget = ""   // basename we're waiting for a type:4/5 event about
+    private var espNowFetchMac = ""
 
     // --- Credential storage state ---
     /** Device can present a biometric/PIN prompt (a credential is enrolled). */
@@ -266,8 +296,11 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_EN_DEVINFO -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowDeviceInfo.parse(capture.text)?.let { _espNowDeviceInfo.value = it } }
                         tag == TAG_EN_LIST -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowPaired.parse(capture.text)?.let { _espNowPaired.value = it } }
                         tag == TAG_EN_MESH -> { _espNowLoading.value = false; if (!capture.timedOut) com.hardwareone.console.ble.EspNowMeshStatus.parse(capture.text)?.let { _espNowMesh.value = it } }
+                        tag == TAG_EN_DEVICES -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowMeshDevices.parse(capture.text)?.let { _espNowDevices.value = it } }
                         tag == TAG_EN_MSGS -> onEspNowFeedMessages(capture.text, capture.timedOut)
                         tag == TAG_EN_REMOTE_ACK -> onEspNowRemoteAck(capture.text, capture.timedOut)
+                        tag == TAG_EN_FILES_ACK -> onEspNowFilesAck(capture.text, capture.timedOut)
+                        tag == TAG_EN_FETCH_ACK -> onEspNowFetchAck(capture.text, capture.timedOut)
                         tag.startsWith(TAG_CONTROLS_PREFIX) ->
                             onControlsCapture(tag.removePrefix(TAG_CONTROLS_PREFIX), capture.text)
                     }
@@ -376,13 +409,54 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         ble.sendCaptured("espnowmeshrole json", TAG_EN_MESHROLE)
         ble.sendCaptured("espnowdeviceinfo json", TAG_EN_DEVINFO)
         ble.sendCaptured("espnowlist json", TAG_EN_LIST)
+        ble.sendCaptured("espnowdevices json", TAG_EN_DEVICES) // peer smart-home metadata + liveness
         ble.sendCaptured("espnowmeshstatus json", TAG_EN_MESH) // sent last → clears the busy flag
     }
 
-    /** Poll just the dynamic bits (paired liveness + mesh peers) on a timer. */
+    /** Fetch the peer metadata snapshot (`espnowdevices json`) — reads the gateway's CACHED store. */
+    fun refreshEspNowDevices() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCaptured("espnowdevices json", TAG_EN_DEVICES)
+    }
+
+    /** Sync a peer's metadata like the web's "Sync Metadata" button: force a fresh pull with
+     *  `espnowrequestmeta <mac>`, then re-read the cache a few times as the peer's reply lands
+     *  (the cache is stale/partial until the peer pushes — that's why a plain read shows old fields). */
+    fun syncEspNowPeerMeta(mac: String) {
+        if (connectionState.value !is ConnectionState.Ready || mac.isEmpty()) return
+        ble.sendCommand("espnowrequestmeta $mac")
+        viewModelScope.launch {
+            repeat(4) {
+                kotlinx.coroutines.delay(800)
+                refreshEspNowDevices()
+            }
+        }
+    }
+
+    /** Edit a PEER's smart-home metadata by running the same setter the local config uses, but ON
+     *  the peer via espnowremote (needs the peer's creds + ESP-NOW encryption). Re-fetches after. */
+    fun editEspNowPeerMeta(mac: String, user: String, pass: String, field: String, value: String) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        val setter = when (field) {
+            "name" -> "espnowsetname ${q(value)}"
+            "friendlyName" -> "espnowfriendlyname ${if (value.isEmpty()) "clear" else q(value)}"
+            "room" -> "espnowroom ${if (value.isEmpty()) "clear" else q(value)}"
+            "zone" -> "espnowzone ${if (value.isEmpty()) "clear" else q(value)}"
+            "tags" -> "espnowtags ${if (value.isEmpty()) "clear" else q(value)}"
+            "stationary" -> "espnowstationary ${if (value == "1") "1" else "0"}"
+            else -> return
+        }
+        ble.sendCommand("espnowremote $mac $user $pass $setter")
+        // The setter mutates the peer's gSettings; the gateway's cache only updates when the peer
+        // pushes, so force a fresh pull (sync) rather than reading the stale cache.
+        viewModelScope.launch { kotlinx.coroutines.delay(800); syncEspNowPeerMeta(mac) }
+    }
+
+    /** Poll just the dynamic bits (paired liveness + mesh peers + metadata) on a timer. */
     fun refreshEspNowPeers() {
         if (connectionState.value !is ConnectionState.Ready) return
         ble.sendCaptured("espnowlist json", TAG_EN_LIST)
+        ble.sendCaptured("espnowdevices json", TAG_EN_DEVICES)
         ble.sendCaptured("espnowmeshstatus json", TAG_EN_MESH)
     }
 
@@ -393,6 +467,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _espNowDeviceInfo.value = null
         _espNowPaired.value = null
         _espNowMesh.value = null
+        _espNowDevices.value = null
         _espNowLoading.value = false
     }
 
@@ -409,7 +484,12 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             espNowRecords.clear()
             _espNowFeed.value = emptyList()
             clearEspNowRemote()
+            clearEspNowFiles()
         }
+        // New open: invalidate any request still in flight from a previous open so its reply can't
+        // hijack this session's cursor (it would page forward from the stale `since` and skip the
+        // history we just reset to 0). The stale reply lands, is discarded, and restarts cleanly.
+        espNowFeedEpoch++
         espNowFeedActive = true
         schedulePoll(0) // start (or resume) the reply-driven drain loop
     }
@@ -427,12 +507,15 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private fun schedulePoll(delayMs: Long) {
         if (!espNowFeedActive || espNowPollInFlight) return
         espNowPollInFlight = true
+        val epoch = espNowFeedEpoch
         viewModelScope.launch {
             if (delayMs > 0) kotlinx.coroutines.delay(delayMs)
-            if (!espNowFeedActive || connectionState.value !is ConnectionState.Ready || espNowFeedMac.isEmpty()) {
+            if (!espNowFeedActive || epoch != espNowFeedEpoch ||
+                connectionState.value !is ConnectionState.Ready || espNowFeedMac.isEmpty()) {
                 espNowPollInFlight = false
                 return@launch
             }
+            espNowInFlightEpoch = epoch
             ble.sendCaptured("espnowmessages json $espNowFeedSince $espNowFeedMac", TAG_EN_MSGS)
             // espNowPollInFlight is cleared when the reply (or capture timeout) lands.
         }
@@ -450,15 +533,22 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearEspNowFeed() {
         espNowFeedActive = false
+        espNowFeedEpoch++ // any reply still in flight now belongs to a closed session — discard it
         espNowFeedMac = ""
         espNowFeedSince = 0L
         espNowRecords.clear()
         _espNowFeed.value = emptyList()
+        clearEspNowFiles()
     }
 
     private fun onEspNowFeedMessages(text: String, timedOut: Boolean) {
         espNowPollInFlight = false
         if (!espNowFeedActive) return
+        if (espNowInFlightEpoch != espNowFeedEpoch) {
+            // Reply from a previous open of this screen — discard its data (it carries a stale cursor)
+            // and restart this session's paging cleanly.
+            schedulePoll(0); return
+        }
         if (timedOut) { schedulePoll(500); return } // dropped reply — retry the same cursor shortly
         val parsed = com.hardwareone.console.ble.EspNowMessages.parse(text)
         if (parsed == null || parsed.error != null) { schedulePoll(500); return }
@@ -466,6 +556,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             // Empty page ({"messages":[]}) = the device is caught up: the pull terminator (serialize
             // contract rule 3). Once the command's output has been collected, this ends the pull.
             if (_espNowRemoteBusy.value && _espNowRemoteResult.value != null) _espNowRemoteBusy.value = false
+            completeEspNowFilesIfReady() // assemble a pending remote `files json` result
             schedulePoll(1_200) // idle cadence — watch for new chat / late-arriving output
             return
         }
@@ -483,6 +574,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             if (_espNowRemoteBusy.value) espNowRemoteLastProgressMs = android.os.SystemClock.elapsedRealtime()
             recomputeEspNowFeed()
         }
+        checkEspNowFetchEvent(parsed.messages) // terminal type:4/5 for an in-flight fetch
         schedulePoll(0) // full page received — drain the next one immediately (forward paging)
     }
 
@@ -513,7 +605,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             val ordered = group.sortedBy { it.piece }
             val first = ordered.first()
             val isCommandResponse = !first.sent && first.reqId != 0L
-            if (!isCommandResponse) {
+            val isFileEvent = first.type != 0 // file-transfer start/success/fail — not a chat line
+            if (!isCommandResponse && !isFileEvent) {
                 chat.add(
                     com.hardwareone.console.ble.EspNowChatLine(
                         from = first.name.ifEmpty { first.mac },
@@ -570,6 +663,164 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _espNowRemoteError.value = null
         _espNowRemoteResult.value = null
         espNowRemoteReqId = 0L
+    }
+
+    // --- ESP-NOW remote file browser ---
+
+    /** Browse a peer's directory: run `files json "<path>"` on it via espnowremote. The result
+     *  arrives through the espnowmessages feed reqId-matched and is assembled on the empty page
+     *  (see [completeEspNowFilesIfReady]); it parses with the local [FileListing] parser. Requires
+     *  ESP-NOW encryption + the peer's credentials (same as a remote command). */
+    fun browseEspNowFiles(mac: String, user: String, pass: String, path: String) {
+        if (connectionState.value !is ConnectionState.Ready || mac.isEmpty()) return
+        espNowFilesUser = user
+        espNowFilesPass = pass
+        _espNowFilesPath.value = path
+        _espNowFilesListing.value = null
+        _espNowFilesError.value = null
+        _espNowFilesBusy.value = true
+        espNowFilesReqId = 0L
+        ble.sendCaptured("espnowremote $mac $user $pass files json ${q(path)}", TAG_EN_FILES_ACK)
+    }
+
+    fun openEspNowDir(mac: String, name: String) =
+        browseEspNowFiles(mac, espNowFilesUser, espNowFilesPass, joinPath(_espNowFilesPath.value, name))
+
+    fun espNowFilesUp(mac: String) {
+        if (_espNowFilesPath.value != "/") browseEspNowFiles(mac, espNowFilesUser, espNowFilesPass, parentPath(_espNowFilesPath.value))
+    }
+
+    private fun clearEspNowFiles() {
+        _espNowFilesBusy.value = false
+        _espNowFilesError.value = null
+        _espNowFilesListing.value = null
+        _espNowFilesPath.value = "/"
+        espNowFilesReqId = 0L
+        _espNowFetchBusy.value = false
+        _espNowFetchStatus.value = null
+        espNowFetchTarget = ""
+        espNowFetchMac = ""
+    }
+
+    /** Download a peer file onto THIS (gateway) device via `espnowfetch`. [name] is an entry in the
+     *  currently-browsed directory; it lands at /espnow/received/<peerMacToken>/<name>. Uses the
+     *  same credentials the browse was opened with. */
+    fun fetchEspNowFile(mac: String, name: String) {
+        if (connectionState.value !is ConnectionState.Ready || mac.isEmpty() || name.isEmpty()) return
+        if (_espNowFetchBusy.value) return // one transfer at a time
+        val path = joinPath(_espNowFilesPath.value, name)
+        espNowFetchMac = mac
+        espNowFetchTarget = name
+        _espNowFetchBusy.value = true
+        _espNowFetchStatus.value = "Fetching $name…"
+        ble.sendCaptured("espnowfetch $mac $espNowFilesUser $espNowFilesPass ${q(path)}", TAG_EN_FETCH_ACK)
+    }
+
+    private fun onEspNowFetchAck(text: String, timedOut: Boolean) {
+        if (timedOut) { _espNowFetchBusy.value = false; _espNowFetchStatus.value = "Timed out sending fetch."; return }
+        val ack = com.hardwareone.console.ble.EspNowAck.parse(text)
+        if (ack == null) { _espNowFetchBusy.value = false; _espNowFetchStatus.value = "Bad reply."; return }
+        if (!ack.ok) { _espNowFetchBusy.value = false; _espNowFetchStatus.value = ack.error ?: "Fetch failed."; return }
+        // The terminal type:4/5 event arrives via the feed (handled in onEspNowFeedMessages). Binary
+        // transfers have no progress events, so just bound the spinner; a late event still updates the
+        // status (espNowFetchTarget stays set until the next fetch).
+        val target = espNowFetchTarget
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(60_000)
+            if (_espNowFetchBusy.value && espNowFetchTarget == target) {
+                _espNowFetchBusy.value = false
+                _espNowFetchStatus.value = "No completion event for $target after 60s — check the device's /espnow/received folder."
+            }
+        }
+    }
+
+    /** Scan a freshly-paged feed for the terminal fetch event (correlate by peer + filename). */
+    private fun checkEspNowFetchEvent(msgs: List<com.hardwareone.console.ble.EspNowMessages.Message>) {
+        if (espNowFetchTarget.isEmpty()) return
+        for (m in msgs) {
+            if (m.sent) continue
+            if (m.type != 4 && m.type != 5) continue
+            if (!m.msg.contains(espNowFetchTarget)) continue
+            val token = espNowFetchMac.replace(":", "").uppercase()
+            _espNowFetchStatus.value = if (m.type == 4) {
+                "Saved to /espnow/received/$token/$espNowFetchTarget"
+            } else {
+                "Failed to receive $espNowFetchTarget"
+            }
+            _espNowFetchBusy.value = false
+            espNowFetchTarget = ""
+            return
+        }
+    }
+
+    private fun onEspNowFilesAck(text: String, timedOut: Boolean) {
+        if (timedOut) { _espNowFilesBusy.value = false; _espNowFilesError.value = "Timed out sending."; return }
+        val ack = com.hardwareone.console.ble.EspNowAck.parse(text)
+        if (ack == null) { _espNowFilesBusy.value = false; _espNowFilesError.value = "Bad reply."; return }
+        if (!ack.ok) { _espNowFilesBusy.value = false; _espNowFilesError.value = ack.error ?: "Failed."; return }
+        espNowFilesReqId = ack.reqId
+        // A directory listing is small (a few pages), so a flat deadline is enough — unlike the
+        // command runner's progress-based watchdog (memreport floods many pages).
+        val reqId = ack.reqId
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(8_000)
+            if (_espNowFilesBusy.value && espNowFilesReqId == reqId && _espNowFilesListing.value == null) {
+                _espNowFilesBusy.value = false
+                _espNowFilesError.value = "No response from peer."
+            }
+        }
+    }
+
+    /** On the feed's empty-page terminator, assemble the reqId-matched records into the complete
+     *  `files json` and parse it. No-op until the result has actually paged in. */
+    private fun completeEspNowFilesIfReady() {
+        if (!_espNowFilesBusy.value || espNowFilesReqId == 0L) return
+        val recs = espNowRecords.values
+            .filter { !it.sent && it.reqId == espNowFilesReqId }
+            .sortedBy { it.seq }
+        if (recs.isEmpty()) return // result hasn't arrived yet — wait for the next empty page
+        // The reqId tags both the JSON (now stored as chunked piece/of records that share the reqId)
+        // AND the peer's "[CMD] … -> OK" echo line. Concatenate the chunks in seq order, then pull
+        // the balanced JSON object out — robust to the echo sitting before/after and to trailing junk.
+        val assembled = recs.joinToString("") { it.msg }
+        if (!assembled.contains('{')) return // JSON hasn't started arriving — wait
+        val json = extractJsonObject(assembled)
+        if (json == null) {
+            _espNowFilesError.value = "Couldn't read the folder listing (result was truncated or malformed)."
+            _espNowFilesBusy.value = false
+            return
+        }
+        val listing = com.hardwareone.console.ble.FileListing.parse(json)
+        when {
+            listing == null -> _espNowFilesError.value = "Couldn't read the folder listing (result was truncated or malformed)."
+            !listing.success -> { _espNowFilesError.value = listing.error ?: "Folder error."; _espNowFilesListing.value = null }
+            else -> _espNowFilesListing.value = listing
+        }
+        _espNowFilesBusy.value = false
+    }
+
+    /** Extract the first balanced top-level JSON object from [s] (string-aware brace matching).
+     *  Returns null if there's no complete `{…}` (e.g. a truncated result). Tolerates a leading
+     *  status line and any trailing text. */
+    private fun extractJsonObject(s: String): String? {
+        val start = s.indexOf('{')
+        if (start < 0) return null
+        var depth = 0; var inStr = false; var esc = false
+        for (i in start until s.length) {
+            val c = s[i]
+            if (inStr) {
+                when {
+                    esc -> esc = false
+                    c == '\\' -> esc = true
+                    c == '"' -> inStr = false
+                }
+            } else when (c) {
+                '"' -> inStr = true
+                '{' -> depth++
+                '}' -> { depth--; if (depth == 0) return s.substring(start, i + 1) }
+            }
+        }
+        return null // never closed — truncated/incomplete
     }
 
     // --- ESP-NOW management + this-device config (text setters; reload after) ---
@@ -1421,7 +1672,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_EN_DEVINFO = "endevinfo"
         const val TAG_EN_LIST = "enlist"
         const val TAG_EN_MESH = "enmesh"
+        const val TAG_EN_DEVICES = "endevices"
         const val TAG_EN_MSGS = "enmsgs"
         const val TAG_EN_REMOTE_ACK = "enremoteack"
+        const val TAG_EN_FILES_ACK = "enfilesack"
+        const val TAG_EN_FETCH_ACK = "enfetchack"
     }
 }

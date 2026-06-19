@@ -2,6 +2,7 @@ package com.hardwareone.console.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,9 +48,11 @@ import com.hardwareone.console.ble.EspNowChatLine
 import com.hardwareone.console.ui.theme.LocalHwColors
 
 /**
- * Per-peer detail, reached by tapping a paired device. Three tabs:
+ * Per-peer detail, reached by tapping a paired device. Four tabs:
  *  - **Messages** — chat feed (`espnowsend` + reassembled `espnowmessages`).
  *  - **Command** — run any CLI command on the peer (`espnowremote`), result matched by reqId.
+ *  - **Files** — browse the peer's filesystem (`espnowremote … files json`), rendered with the same
+ *    rows as the local Files page (identical JSON, same builder on the peer).
  *  - **Manage** — unpair / forget.
  */
 @Composable
@@ -63,6 +66,19 @@ fun EspNowDeviceScreen(
     remoteError: String?,
     remoteResult: String?,
     onRunCommand: (user: String, pass: String, command: String) -> Unit,
+    filesPath: String,
+    filesListing: com.hardwareone.console.ble.FileListing?,
+    filesBusy: Boolean,
+    filesError: String?,
+    fetchBusy: Boolean,
+    fetchStatus: String?,
+    onBrowseFiles: (user: String, pass: String, path: String) -> Unit,
+    onOpenDir: (name: String) -> Unit,
+    onFilesUp: () -> Unit,
+    onFetchFile: (name: String) -> Unit,
+    metadata: com.hardwareone.console.ble.EspNowMeshDevices.Device?,
+    onRefreshMeta: () -> Unit,
+    onSaveMeta: (user: String, pass: String, field: String, value: String) -> Unit,
     onUnpair: () -> Unit,
     onForget: () -> Unit,
     onBack: () -> Unit,
@@ -98,15 +114,23 @@ fun EspNowDeviceScreen(
                 }
 
                 // Tabs.
-                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TabSeg("Messages", tab == 0, Modifier.weight(1f)) { tab = 0 }
-                    TabSeg("Command", tab == 1, Modifier.weight(1f)) { tab = 1 }
-                    TabSeg("Manage", tab == 2, Modifier.weight(1f)) { tab = 2 }
+                // Horizontally scrollable so the tab set can grow past what fits on one row.
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    TabSeg("Messages", tab == 0) { tab = 0 }
+                    TabSeg("Command", tab == 1) { tab = 1 }
+                    TabSeg("Files", tab == 2) { tab = 2 }
+                    TabSeg("Info", tab == 3) { tab = 3 }
+                    TabSeg("Manage", tab == 4) { tab = 4 }
                 }
 
                 when (tab) {
                     0 -> MessagesTab(feed, onSend)
                     1 -> CommandTab(encrypted, remoteBusy, remoteError, remoteResult, onRunCommand)
+                    2 -> FilesTab(encrypted, filesPath, filesListing, filesBusy, filesError, fetchBusy, fetchStatus, onBrowseFiles, onOpenDir, onFilesUp, onFetchFile)
+                    3 -> InfoTab(mac, encrypted, metadata, onRefreshMeta, onSaveMeta)
                     else -> ManageTab(mac, encrypted, onUnpair, onForget)
                 }
             }
@@ -122,7 +146,7 @@ private fun TabSeg(label: String, selected: Boolean, modifier: Modifier = Modifi
             .clip(RoundedCornerShape(8.dp))
             .background(if (selected) hw.onGradient else hw.cardBg)
             .clickable(onClick = onClick)
-            .padding(vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -224,6 +248,160 @@ private fun CommandTab(
             }
         }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun FilesTab(
+    encrypted: Boolean,
+    path: String,
+    listing: com.hardwareone.console.ble.FileListing?,
+    busy: Boolean,
+    error: String?,
+    fetchBusy: Boolean,
+    fetchStatus: String?,
+    onBrowse: (user: String, pass: String, path: String) -> Unit,
+    onOpenDir: (name: String) -> Unit,
+    onUp: () -> Unit,
+    onFetch: (name: String) -> Unit,
+) {
+    val hw = LocalHwColors.current
+    var user by rememberSaveable { mutableStateOf("") }
+    var pass by rememberSaveable { mutableStateOf("") }
+    var started by rememberSaveable { mutableStateOf(false) }
+    Column(modifier = Modifier.fillMaxWidth().fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!encrypted) {
+            Text(
+                text = "Browsing a peer's files needs ESP-NOW encryption. Set a passphrase on the " +
+                    "device (This device ▸ config, or the web), then pair securely.",
+                color = hw.danger,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        if (!started) {
+            // Credentials gate: the peer authenticates the browse with its own admin login.
+            OutlinedTextField(user, { user = it }, singleLine = true, shape = RoundedCornerShape(14.dp),
+                placeholder = { Text("peer username") }, colors = fieldColors(), modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(pass, { pass = it }, singleLine = true, shape = RoundedCornerShape(14.dp),
+                placeholder = { Text("peer password") }, visualTransformation = PasswordVisualTransformation(),
+                colors = fieldColors(), modifier = Modifier.fillMaxWidth())
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                PrimaryButton(
+                    onClick = { started = true; onBrowse(user.trim(), pass, "/") },
+                    enabled = !busy,
+                    text = "Browse",
+                )
+                if (busy) Spinner()
+            }
+            error?.let { Text(it, color = hw.danger, style = MaterialTheme.typography.bodyMedium) }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (path != "/") FileToolButton("Up") { onUp() }
+                if (busy) Spinner()
+            }
+            Text(path, color = hw.muted, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            error?.let { Text(it, color = hw.danger, style = MaterialTheme.typography.bodyMedium) }
+            fetchStatus?.let {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (fetchBusy) Spinner()
+                    Text(it, color = hw.muted, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            val entries = listing?.entries.orEmpty()
+            if (!busy && error == null && entries.isEmpty()) {
+                Text("Empty folder.", color = hw.muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(8.dp))
+            }
+            LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(entries) { e ->
+                    // Files get a "Download" action in the same ⋮ menu as local files → espnowfetch
+                    // onto the gateway device. Always present for files (the VM serializes fetches).
+                    val fetch: (() -> Unit)? = if (e.isDir) null else ({ onFetch(e.name) })
+                    FileRow(
+                        entry = e,
+                        onOpen = { if (e.isDir) onOpenDir(e.name) },
+                        onDownload = fetch,
+                        onRename = null,
+                        onDelete = null,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InfoTab(
+    mac: String,
+    encrypted: Boolean,
+    meta: com.hardwareone.console.ble.EspNowMeshDevices.Device?,
+    onRefresh: () -> Unit,
+    onSaveMeta: (user: String, pass: String, field: String, value: String) -> Unit,
+) {
+    val hw = LocalHwColors.current
+    var editing by rememberSaveable { mutableStateOf(false) }
+    var user by rememberSaveable { mutableStateOf("") }
+    var pass by rememberSaveable { mutableStateOf("") }
+    Column(
+        modifier = Modifier.fillMaxWidth().fillMaxSize().verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            PrimaryButton(onClick = onRefresh, enabled = true, text = "Sync")
+            TextButton(onClick = { editing = !editing }) {
+                Text(if (editing) "Done" else "Edit", color = hw.accent)
+            }
+        }
+        if (!editing) {
+            if (meta == null) {
+                Text(
+                    text = "No metadata yet — it's pulled from the peer on open. If it stays empty, the " +
+                        "peer may be offline; tap Sync to request a fresh push.",
+                    color = hw.muted,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                SectionCard("Identity") {
+                    if (meta.friendlyName.isNotEmpty()) InfoRow("Friendly name", meta.friendlyName)
+                    if (meta.deviceName.isNotEmpty()) InfoRow("Name", meta.deviceName)
+                    if (meta.room.isNotEmpty()) InfoRow("Room", meta.room) // raw value; empty room → no row (matches config page)
+                    if (meta.zone.isNotEmpty()) InfoRow("Zone", meta.zone)
+                    if (meta.tags.isNotEmpty()) InfoRow("Tags", meta.tags)
+                    InfoRow("Stationary", yn(meta.stationary))
+                    InfoRow("MAC", mac)
+                }
+                SectionCard("Status") {
+                    InfoRow("Online", yn(meta.online))
+                    if (meta.lastSeenSec > 0) InfoRow("Last seen", "${meta.lastSeenSec}s ago")
+                    if (meta.source.isNotEmpty()) InfoRow("Source", meta.source)
+                }
+            }
+        } else {
+            // Edit the PEER's metadata via espnowremote setters — needs encryption + the peer's creds.
+            if (!encrypted) {
+                Text(
+                    text = "Editing a peer's metadata needs ESP-NOW encryption + secure pairing.",
+                    color = hw.danger,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            OutlinedTextField(user, { user = it }, singleLine = true, shape = RoundedCornerShape(14.dp),
+                placeholder = { Text("peer username") }, colors = fieldColors(), modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(pass, { pass = it }, singleLine = true, shape = RoundedCornerShape(14.dp),
+                placeholder = { Text("peer password") }, visualTransformation = PasswordVisualTransformation(),
+                colors = fieldColors(), modifier = Modifier.fillMaxWidth())
+            SectionCard("Identity") {
+                EditRow("Friendly name", meta?.friendlyName ?: "") { onSaveMeta(user.trim(), pass, "friendlyName", it) }
+                EditRow("Name", meta?.deviceName ?: "") { onSaveMeta(user.trim(), pass, "name", it) }
+                EditRow("Room", meta?.room ?: "") { onSaveMeta(user.trim(), pass, "room", it) }
+                EditRow("Zone", meta?.zone ?: "") { onSaveMeta(user.trim(), pass, "zone", it) }
+                EditRow("Tags", meta?.tags ?: "") { onSaveMeta(user.trim(), pass, "tags", it) }
+                SwitchRow("Stationary", meta?.stationary == true) { onSaveMeta(user.trim(), pass, "stationary", if (it) "1" else "0") }
+            }
+            Text(
+                "Each Save runs the setter on the peer, then re-reads its metadata after ~1.5s.",
+                color = hw.muted, style = MaterialTheme.typography.labelSmall,
+            )
+        }
     }
 }
 

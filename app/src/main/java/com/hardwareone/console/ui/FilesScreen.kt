@@ -121,8 +121,7 @@ fun FilesScreen(vm: ConsoleViewModel, nav: HeaderNav) {
                 // Header: switcher + refresh (spinner while busy).
                 AppHeader(nav, busy = busy, onRefresh = { vm.loadFiles(path) })
 
-                // Path + storage.
-                Text(path, color = hw.muted, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                // Storage.
                 stats?.let { StorageBar(it) }
 
                 // Toolbar.
@@ -134,6 +133,9 @@ fun FilesScreen(vm: ConsoleViewModel, nav: HeaderNav) {
                     }
                     if (canImport) FileToolButton("Upload") { picker.launch("*/*") }
                 }
+
+                // Current path (below the toolbar).
+                Text(path, color = hw.muted, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
 
                 listing?.error?.let {
                     Text(it, color = hw.danger, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 8.dp))
@@ -209,7 +211,7 @@ private fun StorageBar(stats: com.hardwareone.console.ble.FileStats) {
 }
 
 @Composable
-private fun FileRow(
+internal fun FileRow(
     entry: com.hardwareone.console.ble.FileEntry,
     onOpen: () -> Unit,
     onDownload: (() -> Unit)?,
@@ -378,7 +380,7 @@ private fun ProgressBar(fraction: Float, color: Color, track: Color) {
 }
 
 @Composable
-private fun FileToolButton(text: String, onClick: () -> Unit) {
+internal fun FileToolButton(text: String, onClick: () -> Unit) {
     val hw = LocalHwColors.current
     OutlinedButton(
         onClick = onClick,

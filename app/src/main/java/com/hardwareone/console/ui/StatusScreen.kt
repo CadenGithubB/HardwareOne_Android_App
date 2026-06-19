@@ -195,7 +195,10 @@ private fun StatusBody(
     }
     c.espnow?.let {
         SectionCard("ESP-NOW") {
-            InfoRow("Enabled", yn(it.enabled))
+            // `enabled` is the persistent boot setting (gSettings.espnowenabled), NOT the live state —
+            // call it "Auto-start" so it doesn't read as a bug next to "Running" when ESP-NOW was
+            // started at runtime without being saved as the boot default.
+            InfoRow("Auto-start", yn(it.enabled))
             InfoRow("Running", yn(it.running))
             if (it.deviceName.isNotEmpty()) InfoRow("Name", it.deviceName)
             InfoRow("Mesh", yn(it.mesh))
