@@ -482,11 +482,14 @@ class MainActivity : FragmentActivity() {
                         val meta = enDevices?.devices?.firstOrNull { it.mac.equals(screen.mac, ignoreCase = true) }
                         LaunchedEffect(screen.mac) {
                             repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                                // The VM self-drives a reply-driven forward-paging loop (one request
-                                // in flight; next page fires only after the previous reply lands), so
-                                // there's no timer here that could queue redundant re-fetches.
+                                // ONLY the feed polls while this screen is open. Do NOT fan out other
+                                // captured commands here (notably the metadata sync): the capture layer
+                                // is a single slot with no command↔reply correlation, so a second
+                                // concurrent stream lets a bursty reply flush early and get cross-claimed
+                                // by the wrong tag — stealing the feed's page/terminator and stalling
+                                // chat (sent/received messages silently never appear). Metadata is pulled
+                                // on demand when the Info tab is opened instead.
                                 vm.openEspNowFeed(screen.mac)
-                                vm.syncEspNowPeerMeta(screen.mac) // force-pull the peer's metadata, then read
                                 try {
                                     kotlinx.coroutines.awaitCancellation()
                                 } finally {

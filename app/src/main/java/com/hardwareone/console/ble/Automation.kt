@@ -53,8 +53,11 @@ data class AutomationList(val automations: List<Automation>, val error: String?)
                 when (val type = t.optString("type")) {
                     "time" -> {
                         val time = t.optString("time")
+                        // Cadence lives in `recurrence` (daily|weekly|monthly|yearly); absent = daily.
+                        // Bare time is ambiguous, so always show it (e.g. "14:02 daily").
+                        val recurrence = t.optString("recurrence").ifEmpty { "daily" }
                         val days = t.optString("days")
-                        "at $time" + if (days.isNotEmpty()) " ($days)" else ""
+                        "$time $recurrence" + if (days.isNotEmpty()) " ($days)" else ""
                     }
                     "interval" -> "interval"
                     "manual" -> "manual"

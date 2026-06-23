@@ -52,7 +52,6 @@ fun LogViewerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .systemBarsPadding()
-                .widthIn(max = 760.dp)
                 .padding(horizontal = 12.dp),
         ) {
             // Header: back + name + EXPORT (kept up here so it's always visible).

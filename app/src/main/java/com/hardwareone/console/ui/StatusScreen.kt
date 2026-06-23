@@ -70,7 +70,6 @@ fun StatusScreen(
         ) {
             Column(
                 modifier = Modifier
-                    .widthIn(max = 600.dp)
                     .fillMaxSize()
                     .padding(horizontal = 12.dp),
             ) {

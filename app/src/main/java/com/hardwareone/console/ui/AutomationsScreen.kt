@@ -56,7 +56,7 @@ fun AutomationsScreen(vm: ConsoleViewModel, nav: HeaderNav) {
 
     Box(modifier = Modifier.fillMaxSize().background(Brush.linearGradient(hw.gradient))) {
         Box(modifier = Modifier.fillMaxSize().systemBarsPadding(), contentAlignment = Alignment.TopCenter) {
-            Column(modifier = Modifier.widthIn(max = 600.dp).fillMaxSize().padding(horizontal = 12.dp)) {
+            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
                 AppHeader(nav, busy = busy, onRefresh = { vm.loadAutomations() })
                 Spacer(Modifier.height(8.dp))
                 SectionCard("Automation system") {

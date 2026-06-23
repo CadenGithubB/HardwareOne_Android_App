@@ -55,7 +55,7 @@ fun EspNowBondScreen(
     var confirmSwap by remember { mutableStateOf(false) }
     Box(modifier = Modifier.fillMaxSize().background(Brush.linearGradient(hw.gradient))) {
         Box(modifier = Modifier.fillMaxSize().systemBarsPadding(), contentAlignment = Alignment.TopCenter) {
-            Column(modifier = Modifier.widthIn(max = 600.dp).fillMaxSize().padding(horizontal = 12.dp)) {
+            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onBack) {
                         Icon(painterResource(R.drawable.ic_arrow_back), contentDescription = "Back", tint = hw.onGradient)

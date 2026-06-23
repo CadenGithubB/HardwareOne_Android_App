@@ -94,7 +94,7 @@ fun LlmChatScreen(
             contentAlignment = Alignment.TopCenter,
         ) {
             Column(
-                modifier = Modifier.widthIn(max = 760.dp).fillMaxSize().padding(horizontal = 12.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 // Header: switcher + LLM-specific Retry/Clear actions.

@@ -54,7 +54,7 @@ fun EspNowScreen(
     val hw = LocalHwColors.current
     Box(modifier = Modifier.fillMaxSize().background(Brush.linearGradient(hw.gradient))) {
         Box(modifier = Modifier.fillMaxSize().systemBarsPadding(), contentAlignment = Alignment.TopCenter) {
-            Column(modifier = Modifier.widthIn(max = 600.dp).fillMaxSize().padding(horizontal = 12.dp)) {
+            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
                 AppHeader(nav, busy = loading, onRefresh = onRefresh)
                 Spacer(Modifier.height(8.dp))
                 Column(

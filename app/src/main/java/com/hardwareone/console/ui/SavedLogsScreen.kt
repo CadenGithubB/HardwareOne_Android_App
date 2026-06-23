@@ -61,7 +61,7 @@ fun SavedLogsScreen(
             modifier = Modifier.fillMaxSize().systemBarsPadding(),
             contentAlignment = Alignment.TopCenter,
         ) {
-            Column(modifier = Modifier.widthIn(max = 600.dp).fillMaxSize().padding(horizontal = 12.dp)) {
+            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,

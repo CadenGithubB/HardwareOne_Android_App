@@ -590,10 +590,11 @@ class BleManager(context: Context) {
     //
     // Some commands (e.g. `status json`) return a machine-readable reply that should NOT
     // spam the console. While a capture is armed, inbound reply text is diverted into a
-    // buffer instead of the console. The firmware has no end-of-reply marker, so the
-    // buffer is delivered when the stream goes quiet ([CAPTURE_QUIET_MS]) — the same
-    // idle-delimited strategy the status JSON contract recommends — or, failing any
-    // reply at all, after [CAPTURE_TIMEOUT_MS].
+    // buffer instead of the console. The firmware has no end-of-reply marker, so the buffer
+    // is delivered the moment it forms a complete, balanced top-level JSON object — or, if a
+    // reply stalls/never arrives, after [CAPTURE_TIMEOUT_MS]. (We deliberately do NOT flush a
+    // partial object on a short idle window: a fragment gap under BLE congestion would then
+    // truncate a valid reply and free the slot for the next capture to mis-claim its tail.)
 
     @Volatile private var captureTag: String? = null
     private val captureLock = Any()
@@ -660,15 +661,18 @@ class BleManager(context: Context) {
             return false
         }
         android.util.Log.d("HW1CAP", "claim tag=$captureTag text='${text.take(40)}'")
-        // Flush as soon as the captured buffer is a COMPLETE top-level JSON object. A large reply
-        // (e.g. a 20-record `espnowmessages` page) arrives as many fragments; on a busy device the
-        // gaps between them can exceed CAPTURE_QUIET_MS and prematurely flush a truncated object,
-        // dropping records. Completing on balanced braces makes large/bursty replies reliable, while
-        // the quiet window stays as the fallback (non-JSON replies, or fragments lost mid-flight).
+        // Flush ONLY when the captured buffer is a COMPLETE top-level JSON object (balanced braces).
+        // A capture is only ever started by a fragment beginning with '{' (see above), so every
+        // capture is JSON — there is no non-JSON reply that needs a quiet-window flush. We therefore
+        // do NOT flush a partial object on a short quiet timer: a large reply (e.g. a multi-record
+        // `espnowmessages` page) arrives as many fragments, and on a busy link the gap between two of
+        // them routinely exceeds any short window. Flushing then delivered a TRUNCATED page (dropping
+        // records / advancing the cursor wrong → inconsistent loading) AND freed the capture slot
+        // early, so the late fragments got cross-claimed by the next capture. Instead we hold the slot
+        // until the object balances here, or until the hard CAPTURE_TIMEOUT_MS fires (genuine stall).
         handler.removeCallbacks(captureQuietFlush)
         val complete = synchronized(captureLock) { jsonComplete(captureBuf) }
         if (complete) handler.post(captureQuietFlush)
-        else handler.postDelayed(captureQuietFlush, CAPTURE_QUIET_MS)
         return true
     }
 
@@ -989,7 +993,6 @@ class BleManager(context: Context) {
         private const val HANDSHAKE_TIMEOUT_MS = 6_000L
         private const val PSK_WAIT_TIMEOUT_MS = 6_000L
         private const val IDLE_FLUSH_MS = 250L
-        private const val CAPTURE_QUIET_MS = 80L
         private const val CAPTURE_TIMEOUT_MS = 5_000L
         private const val COMMAND_SILENCE_MS = 3_500L
         private const val IDLE_DISCONNECT_MS = 30 * 60 * 1000L // power-safety: drop an idle link

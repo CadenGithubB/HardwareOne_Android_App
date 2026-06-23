@@ -188,12 +188,21 @@ data class EspNowMessages(val messages: List<Message>, val error: String?) {
         val msg: String,
         val sent: Boolean,
         val sendState: Int,
-        /** Record type: 0=text, 1=file-send-start, 2=send-success, 3=send-failed,
-         *  4=file-recv-success, 5=recv-failed. */
+        /** Record type (firmware `LogMessageType`): [TYPE_TEXT]=0 is the only chat line; every other
+         *  value is a non-chat record — 1-5 file-transfer events, [TYPE_CMD_RESULT]=6 remote-command
+         *  output, [TYPE_SYSTEM_EVENT]=7 system/mesh event (BOOT, metadata). The app keys off
+         *  "type != TYPE_TEXT ⇒ not chat", so any future non-chat type is excluded automatically. */
         val type: Int,
     )
 
     companion object {
+        // Mirror of firmware `LogMessageType`. Only TEXT is a chat line; anything nonzero is not.
+        // (The exact CMD_RESULT/SYSTEM_EVENT values only matter for labeling — the chat filter just
+        // needs "nonzero ⇒ non-chat", so it's robust even if the firmware picks different numbers.)
+        const val TYPE_TEXT = 0
+        const val TYPE_CMD_RESULT = 6   // remote command output → Command tab, never chat
+        const val TYPE_SYSTEM_EVENT = 7 // BOOT / metadata / mesh events → never chat
+
         fun parse(json: String): EspNowMessages? {
             val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
             errorOf(o)?.let { return EspNowMessages(emptyList(), it) }

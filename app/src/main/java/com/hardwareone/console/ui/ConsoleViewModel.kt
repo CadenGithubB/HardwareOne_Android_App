@@ -188,6 +188,11 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private var espNowFeedEpoch = 0L       // bumped each open; invalidates a prior open's in-flight reply
     private var espNowInFlightEpoch = 0L   // epoch the outstanding request was issued under
     private val espNowRecords = LinkedHashMap<Long, com.hardwareone.console.ble.EspNowMessages.Message>()
+    // reqIds of remote commands / file listings THIS app issued. Post the chunked-store rework, every
+    // real peer text record also carries a (nonzero) reqId — its message-group id — so reqId alone no
+    // longer separates chat from command output. A RECEIVED record is command/files output only if its
+    // reqId is one we issued; any other nonzero reqId is peer text. Reset on peer switch with the buffer.
+    private val espNowIssuedReqIds = HashSet<Long>()
 
     // Remote command runner (device detail → Command tab).
     private val _espNowRemoteBusy = MutableStateFlow(false)
@@ -588,6 +593,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             espNowFeedMac = mac
             espNowFeedSince = 0L
             espNowRecords.clear()
+            espNowIssuedReqIds.clear()
             _espNowFeed.value = emptyList()
             clearEspNowRemote()
             clearEspNowFiles()
@@ -597,6 +603,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         // history we just reset to 0). The stale reply lands, is discarded, and restarts cleanly.
         espNowFeedEpoch++
         espNowFeedActive = true
+        // Force-clear the in-flight latch before (re)scheduling. Without this the drain loop can wedge
+        // permanently: if open() fires twice in quick succession (RESUMED re-entry / recomposition),
+        // the 2nd schedulePoll() bails on the still-set latch while the 1st poll's coroutine then aborts
+        // on the bumped epoch WITHOUT sending — leaving nothing in flight AND nothing scheduled, so the
+        // feed silently stops polling (past messages stay, new ones never arrive). The epoch bump above
+        // already invalidates any genuinely in-flight reply, so clearing the latch here is safe.
+        espNowPollInFlight = false
         schedulePoll(0) // start (or resume) the reply-driven drain loop
     }
 
@@ -643,6 +656,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         espNowFeedMac = ""
         espNowFeedSince = 0L
         espNowRecords.clear()
+        espNowIssuedReqIds.clear()
         _espNowFeed.value = emptyList()
         clearEspNowFiles()
     }
@@ -684,9 +698,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         schedulePoll(0) // full page received — drain the next one immediately (forward paging)
     }
 
-    /** Reassemble accumulated records: chunked messages (reqId != 0) are grouped and concatenated
-     *  in piece order; unsolicited messages (reqId 0) stand alone. Command results (received, with
-     *  a nonzero reqId) are routed to the Command tab via [_espNowRemoteResult], not the chat feed. */
+    /** Reassemble accumulated records: chunked messages are grouped by reqId and concatenated in
+     *  piece order. Command/file-listing results (received records whose reqId WE issued) are routed
+     *  to the Command/Files tabs, not the chat feed; peer text (any other reqId) is a chat line. */
     private fun recomputeEspNowFeed() {
         val sorted = espNowRecords.values.sortedBy { it.seq }
 
@@ -699,8 +713,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             if (out.isNotEmpty()) _espNowRemoteResult.value = out.joinToString("") { it.msg }
         }
 
-        // Chat feed: group/reassemble chunked messages (reqId != 0); reqId-0 stand alone. Received
-        // records carrying a nonzero reqId are remote-command output → Command tab, not chat.
+        // Chat feed: group/reassemble chunked messages by reqId; reqId-0 records stand alone by seq.
         val groups = LinkedHashMap<String, MutableList<com.hardwareone.console.ble.EspNowMessages.Message>>()
         for (m in sorted) {
             val key = if (m.reqId != 0L) "r${m.reqId}" else "s${m.seq}"
@@ -710,9 +723,17 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         for (group in groups.values) {
             val ordered = group.sortedBy { it.piece }
             val first = ordered.first()
-            val isCommandResponse = !first.sent && first.reqId != 0L
-            val isFileEvent = first.type != 0 // file-transfer start/success/fail — not a chat line
-            if (!isCommandResponse && !isFileEvent) {
+            // Chat = plain-text records only. The firmware tags every NON-chat record with a distinct
+            // `type` — 1-5 file-transfer events, 6 command-result (remote command output), 7 system
+            // event (BOOT/metadata/mesh) — so "type != TYPE_TEXT ⇒ not chat" is the durable rule: it
+            // survives an app reload, unlike reqId (which we only know for commands issued this session).
+            val isNonChatType = first.type != com.hardwareone.console.ble.EspNowMessages.TYPE_TEXT
+            // Transitional fallback for a gateway still on older firmware that stored command/system
+            // output as plain TEXT (type 0) tagged only by reqId: a received record whose reqId we
+            // issued this session (live command/listing output) or reqId==0 (legacy metadata/system) is
+            // also not chat. Redundant — and harmless — once every gateway tags types; remove later.
+            val isLegacyCmdOrSystem = !first.sent && (first.reqId in espNowIssuedReqIds || first.reqId == 0L)
+            if (!isNonChatType && !isLegacyCmdOrSystem) {
                 chat.add(
                     com.hardwareone.console.ble.EspNowChatLine(
                         from = first.name.ifEmpty { first.mac },
@@ -723,7 +744,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
         }
-        _espNowFeed.value = chat.takeLast(200)
+        // Render the FULL loaded history (the LazyColumn composes only visible rows, so this is cheap)
+        // so the user can scroll up through everything that's been paged in. It's already bounded by the
+        // raw record cap (espNowRecords keeps the newest ~300) and the firmware ring (250 per peer).
+        _espNowFeed.value = chat
     }
 
     // --- ESP-NOW remote command runner (device detail → Command tab) ---
@@ -749,6 +773,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         // for a peer that never answers at all (bad creds / unreachable): if nothing arrives after a
         // quiet gap, clear the spinner and surface the error. Progress (new records) keeps it alive.
         espNowRemoteReqId = ack.reqId
+        espNowIssuedReqIds.add(ack.reqId) // so its output is routed to the Command tab, not chat
         espNowRemoteLastProgressMs = android.os.SystemClock.elapsedRealtime()
         pollEspNowFeed()
         viewModelScope.launch {
@@ -840,19 +865,25 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Scan a freshly-paged feed for the terminal fetch event (correlate by peer + filename). */
+    /** Scan a freshly-paged feed for the fetch outcome (correlate by peer + filename). Two ways a
+     *  fetch can end: a terminal transfer event (type 4 received-ok / type 5 received-failed), OR — when
+     *  the sender refuses up front (e.g. the file exceeds the device's transfer cap) — a plain-text
+     *  command-result verdict. The firmware owns that decision and writes the reason in plain English
+     *  ("Error: '…' is N bytes — exceeds the 128 KB … limit; not sent"); we just surface it verbatim
+     *  instead of spinning to the 60s timeout. Per contract, failure verdicts begin with "Error". */
     private fun checkEspNowFetchEvent(msgs: List<com.hardwareone.console.ble.EspNowMessages.Message>) {
         if (espNowFetchTarget.isEmpty()) return
         for (m in msgs) {
             if (m.sent) continue
-            if (m.type != 4 && m.type != 5) continue
             if (!m.msg.contains(espNowFetchTarget)) continue
-            val token = espNowFetchMac.replace(":", "").uppercase()
-            _espNowFetchStatus.value = if (m.type == 4) {
-                "Saved to /espnow/received/$token/$espNowFetchTarget"
-            } else {
-                "Failed to receive $espNowFetchTarget"
-            }
+            val status = when {
+                m.type == 4 -> "Saved to /espnow/received/${espNowFetchMac.replace(":", "").uppercase()}/$espNowFetchTarget"
+                m.type == 5 -> "Failed to receive $espNowFetchTarget"
+                // Sender-side refusal: no transfer ever started, so this verdict is the only signal.
+                m.msg.trimStart().startsWith("Error", ignoreCase = true) -> m.msg.trim()
+                else -> null // e.g. "File sent successfully …" echo — not terminal; await the type:4 event
+            } ?: continue
+            _espNowFetchStatus.value = status
             _espNowFetchBusy.value = false
             espNowFetchTarget = ""
             return
@@ -865,6 +896,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         if (ack == null) { _espNowFilesBusy.value = false; _espNowFilesError.value = "Bad reply."; return }
         if (!ack.ok) { _espNowFilesBusy.value = false; _espNowFilesError.value = ack.error ?: "Failed."; return }
         espNowFilesReqId = ack.reqId
+        espNowIssuedReqIds.add(ack.reqId) // so the listing's records are routed to Files, not chat
         // A directory listing is small (a few pages), so a flat deadline is enough — unlike the
         // command runner's progress-based watchdog (memreport floods many pages).
         val reqId = ack.reqId

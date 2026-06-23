@@ -115,7 +115,7 @@ fun FilesScreen(vm: ConsoleViewModel, nav: HeaderNav) {
     Box(modifier = Modifier.fillMaxSize().background(Brush.linearGradient(hw.gradient))) {
         Box(modifier = Modifier.fillMaxSize().systemBarsPadding(), contentAlignment = Alignment.TopCenter) {
             Column(
-                modifier = Modifier.widthIn(max = 760.dp).fillMaxSize().padding(horizontal = 12.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 // Header: switcher + refresh (spinner while busy).

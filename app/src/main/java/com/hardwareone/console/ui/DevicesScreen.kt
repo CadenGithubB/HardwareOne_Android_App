@@ -69,7 +69,7 @@ fun DevicesScreen(
             contentAlignment = Alignment.TopCenter,
         ) {
             Column(
-                modifier = Modifier.widthIn(max = 600.dp).fillMaxSize().padding(horizontal = 12.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 // Header: switcher (nav hub) + settings.

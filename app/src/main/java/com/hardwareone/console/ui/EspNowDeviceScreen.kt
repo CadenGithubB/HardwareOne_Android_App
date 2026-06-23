@@ -30,8 +30,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -86,12 +88,17 @@ fun EspNowDeviceScreen(
     val hw = LocalHwColors.current
     var tab by rememberSaveable { mutableStateOf(0) }
 
+    // Pull the peer's metadata only when the Info tab is actually viewed — never on the Messages tab,
+    // where its `espnowdevices` fan-out would race the chat feed's captures and stall it. Keyed on the
+    // tab so it fires once per entry into Info (and re-fires if you leave and come back).
+    LaunchedEffect(tab) { if (tab == 3) onRefreshMeta() }
+
     Box(modifier = Modifier.fillMaxSize().background(Brush.linearGradient(hw.gradient))) {
         Box(
             modifier = Modifier.fillMaxSize().systemBarsPadding().imePadding(),
             contentAlignment = Alignment.TopCenter,
         ) {
-            Column(modifier = Modifier.widthIn(max = 600.dp).fillMaxSize().padding(horizontal = 12.dp)) {
+            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
                 // Back header.
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -164,7 +171,17 @@ private fun MessagesTab(feed: List<EspNowChatLine>, onSend: (String) -> Unit) {
     var input by rememberSaveable { mutableStateOf("") }
     Column(modifier = Modifier.fillMaxWidth().fillMaxSize()) {
         val listState = rememberLazyListState()
-        LaunchedEffect(feed.size) { if (feed.isNotEmpty()) listState.scrollToItem(feed.lastIndex) }
+        // "Pinned to bottom" = the last row is visible (or the list is empty). Only auto-follow new
+        // messages while pinned, so scrolling UP to read older history isn't yanked back down by an
+        // incoming poll. On first load the list is empty → pinned → it scrolls to the newest as usual.
+        val pinnedToBottom by remember {
+            derivedStateOf {
+                val info = listState.layoutInfo
+                val last = info.visibleItemsInfo.lastOrNull()
+                last == null || last.index >= info.totalItemsCount - 1
+            }
+        }
+        LaunchedEffect(feed.size) { if (feed.isNotEmpty() && pinnedToBottom) listState.scrollToItem(feed.lastIndex) }
         Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
             if (feed.isEmpty()) {
                 Text(
@@ -243,12 +260,29 @@ private fun CommandTab(
         }
         error?.let { Text(it, color = hw.danger, style = MaterialTheme.typography.bodyMedium) }
         result?.let {
+            val shown = remember(it) { prettyCommandResult(it) }
             SectionCard("Result") {
-                Text(it, color = hw.onGradient, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                Text(shown, color = hw.onGradient, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
             }
         }
         Spacer(Modifier.height(8.dp))
     }
+}
+
+/** Pretty-print a remote command's result when it contains JSON. Firmware replies arrive as a single
+ *  line, sometimes behind a "[CMD] … -> OK" echo; strip the echo, indent the JSON object/array, and
+ *  leave any non-JSON result (e.g. `help`) untouched. Falls back to raw on anything unparseable. */
+private fun prettyCommandResult(raw: String): String {
+    val trimmed = raw.trim()
+    val start = trimmed.indexOfFirst { it == '{' || it == '[' }
+    if (start < 0) return trimmed // no JSON — plain-text result, show as-is
+    val prefix = trimmed.substring(0, start).trim()
+    val json = trimmed.substring(start)
+    val pretty = runCatching {
+        if (json[0] == '{') org.json.JSONObject(json).toString(2)
+        else org.json.JSONArray(json).toString(2)
+    }.getOrNull() ?: return trimmed // not valid JSON (e.g. trailing junk) — show raw
+    return if (prefix.isNotEmpty()) "$prefix\n\n$pretty" else pretty
 }
 
 @Composable
@@ -302,9 +336,11 @@ private fun FilesTab(
             Text(path, color = hw.muted, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
             error?.let { Text(it, color = hw.danger, style = MaterialTheme.typography.bodyMedium) }
             fetchStatus?.let {
+                val isError = it.startsWith("Error", ignoreCase = true) || it.startsWith("Failed") ||
+                    it.startsWith("Timed out") || it.startsWith("No completion") || it.startsWith("Bad reply")
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (fetchBusy) Spinner()
-                    Text(it, color = hw.muted, style = MaterialTheme.typography.labelMedium)
+                    Text(it, color = if (isError) hw.danger else hw.muted, style = MaterialTheme.typography.labelMedium)
                 }
             }
             val entries = listing?.entries.orEmpty()
