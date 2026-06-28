@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Standard home-screen widget. No `not_keyguard` opt-out, so it's also offered on the lock screen
+    (all widgets are, per the Android lock-screen-widget contract). The app pushes live updates while
+    it runs (a widget can't drive BLE); updatePeriodMillis=30min only re-renders from cache so a stale
+    snapshot greys itself out overnight without the app — it does NOT fetch fresh device data.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="110dp"
+    android:minHeight="40dp"
+    android:targetCellWidth="2"
+    android:targetCellHeight="1"
+    android:updatePeriodMillis="1800000"
+    android:initialLayout="@layout/widget_hardwareone"
+    android:previewLayout="@layout/widget_hardwareone"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen"
+    android:configure="com.hardwareone.console.widget.WidgetConfigActivity"
+    android:description="@string/widget_description" />

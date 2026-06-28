@@ -25,6 +25,17 @@ sealed interface ConnectionState {
     data class Failed(val reason: String) : ConnectionState
 }
 
+/** The device name carried by the connecting/connected states; null for disconnected/scanning/failed. */
+fun deviceNameOrNull(state: ConnectionState): String? = when (state) {
+    is ConnectionState.Connecting -> state.deviceName
+    is ConnectionState.DiscoveringServices -> state.deviceName
+    is ConnectionState.NegotiatingMtu -> state.deviceName
+    is ConnectionState.EnablingNotifications -> state.deviceName
+    is ConnectionState.Securing -> state.deviceName
+    is ConnectionState.Ready -> state.deviceName
+    else -> null
+}
+
 /** A device surfaced by a scan, deduplicated by MAC address. */
 data class DiscoveredDevice(
     val address: String,

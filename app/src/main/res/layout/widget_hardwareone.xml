@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center_vertical"
+    android:background="@drawable/widget_bg"
+    android:paddingHorizontal="12dp"
+    android:paddingVertical="8dp">
+
+    <!-- Line 1: status dot · device name · status word (battery% / offline) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <ImageView
+            android:id="@+id/widget_dot"
+            android:layout_width="11dp"
+            android:layout_height="11dp"
+            android:layout_marginEnd="9dp"
+            android:src="@drawable/widget_dot"
+            android:contentDescription="@string/widget_status_desc" />
+
+        <TextView
+            android:id="@+id/widget_name"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="HardwareOne"
+            android:textColor="@color/widget_text"
+            android:textStyle="bold"
+            android:textSize="13sp"
+            android:includeFontPadding="false"
+            android:maxLines="1"
+            android:ellipsize="end" />
+
+        <TextView
+            android:id="@+id/widget_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="offline"
+            android:textColor="@color/widget_text_muted"
+            android:textSize="12sp"
+            android:includeFontPadding="false"
+            android:maxLines="1" />
+    </LinearLayout>
+
+    <!-- Line 2: configurable detail fields (voltage · firmware · updated). Hidden only when empty. -->
+    <TextView
+        android:id="@+id/widget_details"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:textColor="@color/widget_text_muted"
+        android:textSize="10sp"
+        android:includeFontPadding="false"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:visibility="gone" />
+</LinearLayout>

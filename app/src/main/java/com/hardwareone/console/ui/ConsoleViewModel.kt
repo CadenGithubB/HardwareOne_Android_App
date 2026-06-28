@@ -287,6 +287,25 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             ble.state.collect { st -> if (st is ConnectionState.Ready) refreshBattery() }
         }
+        // Keep the home/lock-screen widget's last-known snapshot fresh (connection + battery +
+        // identity). The widget can't drive BLE itself, so it just renders what we persist here on
+        // each change; `updatedLabel` lets it show how stale the glance is. `deviceInfo` carries the
+        // address (the widget's reconnect target) and firmware; push() keeps the last non-empty
+        // identity, so it survives a disconnect and a process restart.
+        viewModelScope.launch {
+            kotlinx.coroutines.flow.combine(connectionState, battery, deviceInfo) { st, bat, info ->
+                Triple(st, bat, info)
+            }.collect { pushWidgetSnapshot() }
+        }
+        // Heartbeat: while connected, re-stamp the widget snapshot every couple of minutes so a live
+        // but idle link (no battery/state change) doesn't age into "stale". When the app is killed the
+        // heartbeat stops, so the widget greys itself out on its own update period.
+        viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(120_000)
+                if (connectionState.value is ConnectionState.Ready) pushWidgetSnapshot()
+            }
+        }
         // Route captured (off-console) command replies to their pages.
         viewModelScope.launch {
             ble.captures.collect { capture ->
@@ -365,6 +384,31 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     fun startScan() = ble.startScan()
     fun stopScan() = ble.stopScan()
     fun connect(device: DiscoveredDevice) = ble.connect(device.address)
+    /** Connect by MAC — used by the widget's tap-to-reconnect (the address is persisted, unlike the
+     *  in-memory `lastDevice` that [reconnect] relies on, so this still works after a cold start). */
+    fun connectAddress(address: String) = ble.connect(address)
+
+    /** Persist the current device snapshot to the home/lock-screen widget (connection, battery,
+     *  identity, timestamp). Called on every state change and on the connected heartbeat. */
+    private fun pushWidgetSnapshot() {
+        val st = connectionState.value
+        val bat = battery.value
+        val info = deviceInfo.value
+        val updatedLabel = android.text.format.DateFormat
+            .getTimeFormat(getApplication()).format(java.util.Date())
+        com.hardwareone.console.widget.HardwareOneWidgetProvider.push(
+            context = getApplication(),
+            connected = st is ConnectionState.Ready,
+            name = info?.name ?: com.hardwareone.console.ble.deviceNameOrNull(st),
+            address = info?.address,
+            batteryPct = bat?.percentage ?: -1,
+            charging = bat?.charging == true,
+            hasBattery = bat?.available == true,
+            voltage = bat?.voltage ?: 0.0,
+            firmware = info?.firmware,
+            updatedLabel = updatedLabel,
+        )
+    }
     fun disconnect() = ble.disconnect()
     fun reconnect() = ble.reconnect()
     fun readStatus() = ble.readStatus()

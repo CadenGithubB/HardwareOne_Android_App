@@ -140,6 +140,7 @@ class MainActivity : FragmentActivity() {
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
+        handleWidgetConnect(intent) // tap-to-reconnect launched us from the widget
         setContent {
             var themePref by remember { mutableStateOf(ThemeStore.load(this)) }
             val darkTheme = when (themePref) {
@@ -702,6 +703,31 @@ class MainActivity : FragmentActivity() {
             }
             .build()
         prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+    }
+
+    // --- Widget tap-to-reconnect -------------------------------------------------------
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleWidgetConnect(intent)
+    }
+
+    /** If the launch carried a device address (only set when the widget showed "disconnected"),
+     *  reconnect to it. From the lock screen this runs after the unlock the system already required
+     *  to open the activity, so no sensitive action happens on a locked device. */
+    private fun handleWidgetConnect(intent: Intent?) {
+        val address = intent?.getStringExtra(EXTRA_CONNECT_ADDRESS) ?: return
+        intent.removeExtra(EXTRA_CONNECT_ADDRESS) // consume so it doesn't re-fire
+        val missing = BleManager.requiredPermissions().filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) vm.connectAddress(address) else permissionLauncher.launch(missing.toTypedArray())
+    }
+
+    companion object {
+        /** Intent extra: a device MAC the app should reconnect to (set by the widget when offline). */
+        const val EXTRA_CONNECT_ADDRESS = "hw1_connect_address"
     }
 
     // --- Scanning entry point ----------------------------------------------------------

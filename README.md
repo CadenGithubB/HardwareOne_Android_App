@@ -1,4 +1,4 @@
-# HardwareOne Console (Android) — v2.5.0
+# HardwareOne Console (Android) — v2.5.1
 
 A **Google-free** Android app that scans for, connects to, and controls an **ESP32-S3
 "HardwareOne"** device over **Bluetooth LE** — a terminal-style console plus purpose-built

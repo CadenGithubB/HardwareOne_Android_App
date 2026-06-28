@@ -4,4 +4,11 @@
     <color name="ic_launcher_background">#667EEA</color>
     <!-- Launch window background (light): gradient start. Overridden in values-night. -->
     <color name="window_bg">#667EEA</color>
+
+    <!-- App widget. A dark translucent pill that stays legible on any wallpaper / the lock screen. -->
+    <color name="widget_bg">#D91A1D24</color>
+    <color name="widget_connected">#4CAF50</color>
+    <color name="widget_disconnected">#9E9E9E</color>
+    <color name="widget_text">#FFFFFFFF</color>
+    <color name="widget_text_muted">#B3FFFFFF</color>
 </resources>
