@@ -170,8 +170,6 @@ private fun SensorCard(
 
         // Body.
         when {
-            entry.kind == SensorEntry.Kind.STREAM ->
-                Note("Live view isn't available over Bluetooth — use the web UI or OLED.")
             !entry.connected -> Note("Not detected on the bus.")
             !entry.enabled -> Note("Disabled — toggle on to read.")
             !entry.dataValid -> Note("Reading unavailable.")
@@ -182,8 +180,18 @@ private fun SensorCard(
                     y = entry.numbers["y"],
                     buttons = (entry.numbers["buttons"] ?: 0.0).toLong(),
                 )
+            // A stream sensor with NO scalar summary can't be shown over BLE — its payload is the full
+            // frame/audio, which lives on the web/OLED. A dual-nature stream (e.g. thermal, which
+            // carries a min/avg/max summary next to its 768-px frame) falls through and renders it.
+            entry.readings.isEmpty() && entry.kind == SensorEntry.Kind.STREAM ->
+                Note("Live view isn't available over Bluetooth — use the web UI or OLED.")
             entry.readings.isEmpty() -> Note("No readings yet.")
-            else -> ReadingNodes(entry.readings, indent = 0.dp)
+            else -> {
+                ReadingNodes(entry.readings, indent = 0.dp)
+                if (entry.kind == SensorEntry.Kind.STREAM) {
+                    Note("Summary only — the full stream is on the web UI or OLED.")
+                }
+            }
         }
 
         // Live action controls (tune/volume/mute/seek/reads/sync), shown when the sensor is on.

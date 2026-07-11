@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import javax.crypto.Cipher
 
 /** One console line, tagged so the UI can colour it. */
@@ -230,6 +231,75 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private var espNowFetchTarget = ""   // basename we're waiting for a type:4/5 event about
     private var espNowFetchMac = ""
 
+    // --- Maps page (map/maplist JSON + waypoint/gpstrack text verbs + .hwmap fetch/render) ---
+    private val _mapInfo = MutableStateFlow<com.hardwareone.console.ble.MapInfo?>(null)
+    val mapInfo: StateFlow<com.hardwareone.console.ble.MapInfo?> = _mapInfo.asStateFlow()
+    private val _mapList = MutableStateFlow<List<String>>(emptyList())
+    val mapList: StateFlow<List<String>> = _mapList.asStateFlow()
+    private val _mapsBusy = MutableStateFlow(false)
+    val mapsBusy: StateFlow<Boolean> = _mapsBusy.asStateFlow()
+    private val _mapsError = MutableStateFlow<String?>(null)
+    val mapsError: StateFlow<String?> = _mapsError.asStateFlow()
+    private val _mapsNotice = MutableStateFlow<String?>(null) // transient text-verb feedback
+    val mapsNotice: StateFlow<String?> = _mapsNotice.asStateFlow()
+
+    // The parsed map the app renders (fetched via fileread, cached on the phone) + its device path.
+    private val _mapFile = MutableStateFlow<com.hardwareone.console.ble.HwMapFile?>(null)
+    val mapFile: StateFlow<com.hardwareone.console.ble.HwMapFile?> = _mapFile.asStateFlow()
+    private val _mapFilePath = MutableStateFlow<String?>(null)
+    val mapFilePath: StateFlow<String?> = _mapFilePath.asStateFlow()
+    private val _mapDownload = MutableStateFlow<com.hardwareone.console.ble.FileTransfer?>(null)
+    val mapDownload: StateFlow<com.hardwareone.console.ble.FileTransfer?> = _mapDownload.asStateFlow()
+
+    private val _mapWaypoints = MutableStateFlow<List<com.hardwareone.console.ble.Waypoint>>(emptyList())
+    val mapWaypoints: StateFlow<List<com.hardwareone.console.ble.Waypoint>> = _mapWaypoints.asStateFlow()
+    private val _mapTarget = MutableStateFlow(-1) // nav-target slot index, -1 = none
+    val mapTarget: StateFlow<Int> = _mapTarget.asStateFlow()
+
+    private val _mapGps = MutableStateFlow<com.hardwareone.console.ble.GpsFix?>(null)
+    val mapGps: StateFlow<com.hardwareone.console.ble.GpsFix?> = _mapGps.asStateFlow()
+
+    private val _mapTrack = MutableStateFlow<com.hardwareone.console.ble.GpsTrack?>(null)
+    val mapTrack: StateFlow<com.hardwareone.console.ble.GpsTrack?> = _mapTrack.asStateFlow()
+    private val _mapTrackFiles = MutableStateFlow<List<String>>(emptyList()) // absolute device paths
+    val mapTrackFiles: StateFlow<List<String>> = _mapTrackFiles.asStateFlow()
+    private val _mapLiveTracking = MutableStateFlow(false)
+    val mapLiveTracking: StateFlow<Boolean> = _mapLiveTracking.asStateFlow()
+
+    private val _mapTrackFilesLoading = MutableStateFlow(false)
+    val mapTrackFilesLoading: StateFlow<Boolean> = _mapTrackFilesLoading.asStateFlow()
+
+    // Windowed-fileread loop for map/sidecar/track fetches (independent of the Files page's loop).
+    // All of this state is confined to the MAIN dispatcher (the capture collector's thread) —
+    // background parsers hop back before touching it.
+    private var mapReadPath = ""
+    private var mapReadOffset = 0L
+    private var mapReadRetried = false
+    private var mapReadPurpose = MAP_READ_NONE
+    private var mapReadExpected = 0L
+    private val mapReadBuf = java.io.ByteArrayOutputStream()
+    private val mapReadCandidates = ArrayDeque<String>() // fallback paths for the map download
+    // Discovery fallback: browse /maps via `files json` when the reconstructed paths all 404.
+    private var mapDiscoverTried = false
+    private val mapDiscoverDirs = ArrayDeque<String>()
+    private val mapDiscoverFound = mutableListOf<String>()
+    private var mapDiscoverCurrentDir = ""
+    private val mapSidecarCandidates = ArrayDeque<String>()
+    // A sidecar fileread that TIMES OUT (vs. replying "not found") means this session can't use
+    // fileread at all (needs Secure Channel + admin) — stop auto-probing so the background fetch
+    // doesn't hog the single capture slot for 5 s per candidate after every waypoint refresh.
+    private var mapSidecarUnavailable = false
+    private var mapGpsMisses = 0 // stop polling gpsread after 3 straight timeouts (no GPS sensor)
+    private val liveTrackPoints = mutableListOf<com.hardwareone.console.ble.TrackPoint>()
+    private val mapTrackDirs = ArrayDeque<String>()
+    private var mapTrackCurrentDir = ""
+    private var mapTrackDirDenied = false
+    private val mapTrackFilesTmp = mutableListOf<String>()
+    private var waypointScrapeJob: kotlinx.coroutines.Job? = null
+    // Serialises the text-verb scrapes: two live scrapes would both claim the first matching
+    // console line, reporting one verb's verdict for the other.
+    private val mapScrapeMutex = kotlinx.coroutines.sync.Mutex()
+
     // --- Credential storage state ---
     /** Device can present a biometric/PIN prompt (a credential is enrolled). */
     val canUseCredentialStore: Boolean get() = credentials.canAuthenticate()
@@ -284,8 +354,25 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         }
         // Fetch battery the instant a device is Ready (no auth) so it's there on connect, not
         // a poll-interval later. The auth branch above covers the login-required case.
+        // On losing Ready, unwedge multi-step transfer machines whose in-flight capture was
+        // dropped by the disconnect: the Files busy latch/upload buffer and the maps read loop.
         viewModelScope.launch {
-            ble.state.collect { st -> if (st is ConnectionState.Ready) refreshBattery() }
+            ble.state.collect { st ->
+                if (st is ConnectionState.Ready) {
+                    refreshBattery()
+                } else {
+                    _filesBusy.value = false
+                    writeBytes = null
+                    _mapsBusy.value = false
+                    _mapTrackFilesLoading.value = false
+                    mapSidecarCandidates.clear()
+                    mapReadCandidates.clear()
+                    if (mapReadPurpose != MAP_READ_NONE) {
+                        mapReadPurpose = MAP_READ_NONE
+                        _mapDownload.value = _mapDownload.value?.copy(finished = true, error = "Disconnected.")
+                    }
+                }
+            }
         }
         // Keep the home/lock-screen widget's last-known snapshot fresh (connection + battery +
         // identity). The widget can't drive BLE itself, so it just renders what we persist here on
@@ -346,6 +433,12 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_EN_REMOTE_ACK -> onEspNowRemoteAck(capture.text, capture.timedOut)
                         tag == TAG_EN_FILES_ACK -> onEspNowFilesAck(capture.text, capture.timedOut)
                         tag == TAG_EN_FETCH_ACK -> onEspNowFetchAck(capture.text, capture.timedOut)
+                        tag == TAG_MAP_INFO -> onMapInfoCapture(capture.text, capture.timedOut)
+                        tag == TAG_MAP_LIST -> { if (!capture.timedOut) com.hardwareone.console.ble.MapListing.parse(capture.text)?.let { _mapList.value = it.maps } }
+                        tag == TAG_MAP_GPS -> onMapGpsCapture(capture.text, capture.timedOut)
+                        tag == TAG_MAP_READ -> onMapReadCapture(capture.text, capture.timedOut)
+                        tag == TAG_MAP_DISCOVER -> onMapDiscoverCapture(capture.text, capture.timedOut)
+                        tag == TAG_MAP_TRACKDIR -> onMapTrackDirCapture(capture.text, capture.timedOut)
                         tag.startsWith(TAG_CONTROLS_PREFIX) ->
                             onControlsCapture(tag.removePrefix(TAG_CONTROLS_PREFIX), capture.text)
                     }
@@ -1288,6 +1381,12 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         val r = com.hardwareone.console.ble.FileReadChunk.parse(text)
             ?: run { failRead("Unexpected file-read reply."); return }
         if (!r.success) { failRead("Read failed: ${r.error}"); return }
+        // Correlation guard: drop a late/cross-claimed window (e.g. from the Maps page's
+        // identical fileread loop) and re-request the one we actually need.
+        if (r.offset != readOffset || (r.path.isNotEmpty() && r.path != readPath)) {
+            ble.sendCaptured("fileread ${q(readPath)} $readOffset $readWindow", TAG_FILE_READ)
+            return
+        }
         val bytes = if (r.enc == "b64") {
             runCatching { android.util.Base64.decode(r.data, android.util.Base64.DEFAULT) }.getOrDefault(ByteArray(0))
         } else {
@@ -1436,6 +1535,747 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             _controls.value = _controls.value + (moduleId to it)
         }
     }
+
+    // --- Maps page ----------------------------------------------------------------------
+    //
+    // Only `map`/`maplist` (and `gpsread`) reply JSON; every other map verb replies plain text
+    // with stable prefixes, so verbs send on the console and scrape their verdict line off
+    // [BleManager.incoming]. Rendering needs the raw .hwmap bytes, fetched with the same windowed
+    // `fileread` scheme as the Files page (admin + secure channel) and cached on the phone keyed
+    // by device path + size.
+
+    /** Load/refresh the page: map list, device-loaded map info, waypoints. */
+    fun loadMaps() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        // Don't refresh while a map/track/sidecar transfer is running. This is called on every
+        // screen resume and Activity recreation (e.g. folding the device); re-fetching metadata
+        // would flip the busy spinner and contend for the capture slot with the in-flight
+        // fileread — the "full page refresh" that interrupted downloads. The transfer + rendered
+        // map both live in this ViewModel, so they survive the resume untouched.
+        if (mapReadPurpose != MAP_READ_NONE) return
+        _mapsBusy.value = true
+        mapGpsMisses = 0
+        mapSidecarUnavailable = false // a manual refresh re-probes fileread availability once
+        ble.sendCaptured("maplist json", TAG_MAP_LIST)
+        ble.sendCaptured("map json", TAG_MAP_INFO) // sent last → clears busy
+        refreshMapWaypoints()
+    }
+
+    fun clearMapsNotice() { _mapsNotice.value = null }
+
+    /** Surface a page-level notice from the Maps UI (e.g. selection-cap warnings). */
+    fun reportMapsNotice(message: String) { _mapsNotice.value = message }
+
+    private fun onMapInfoCapture(text: String, timedOut: Boolean) {
+        _mapsBusy.value = false
+        if (timedOut || text.isBlank()) {
+            if (_mapInfo.value == null) {
+                _mapsError.value = "No reply to `map json` — this firmware may not include Maps."
+            }
+            return
+        }
+        val info = com.hardwareone.console.ble.MapInfo.parse(text) ?: return
+        _mapsError.value = null
+        _mapInfo.value = info
+        if (info.valid) maybeLoadCachedMap(info)
+    }
+
+    /** The device path of the loaded map: match `maplist` by filename, else the canonical layout. */
+    fun resolveMapPath(info: com.hardwareone.console.ble.MapInfo): String =
+        _mapList.value.firstOrNull { it.endsWith("/${info.filename}") }
+            ?: "/maps/${info.base}/${info.filename}"
+
+    private fun mapCacheFile(path: String, size: Long): java.io.File {
+        val safe = path.trim('/').replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return java.io.File(getApplication<Application>().cacheDir, "maps/$safe-$size.hwmap")
+    }
+
+    /** Parse a previously-downloaded copy so the map renders instantly on re-open/reconnect. */
+    private fun maybeLoadCachedMap(info: com.hardwareone.console.ble.MapInfo) {
+        val path = resolveMapPath(info)
+        if (_mapFile.value != null && _mapFilePath.value == path) return
+        val f = mapCacheFile(path, info.fileSize)
+        if (!f.exists()) return
+        viewModelScope.launch(Dispatchers.Default) {
+            val parsed = runCatching { com.hardwareone.console.ble.HwMapFile.parse(f.readBytes()) }.getOrNull() ?: return@launch
+            // The mapRead* machine is main-confined — hop back before touching it.
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                _mapFile.value = parsed
+                _mapFilePath.value = path
+                refreshWaypointSidecar()
+            }
+        }
+    }
+
+    /** Fetch the device-loaded map's bytes for rendering (windowed fileread; admin only). */
+    fun downloadCurrentMap() {
+        val info = _mapInfo.value ?: return
+        if (!info.valid || connectionState.value !is ConnectionState.Ready) return
+        if (mapReadPurpose != MAP_READ_NONE) { _mapsNotice.value = "Another map transfer is in progress."; return }
+        // `map json` only reports the map's BASENAME, not its real path, so we can't be sure of
+        // the on-disk layout. Try the cheap reconstructions first (maplist entry that ends with
+        // the basename, canonical /maps/<base>/<file>, loose root); if all 404, fall back to
+        // discovering the real path by browsing /maps with the same `files json` the Files page
+        // uses (§discoverMapDownload) — reading a path the device actually reported, never a guess.
+        mapDiscoverTried = false
+        mapReadCandidates.clear()
+        mapReadCandidates.addAll(listOf(resolveMapPath(info), "/maps/${info.filename}").distinct())
+        startMapRead(mapReadCandidates.removeFirst(), MAP_READ_MAP, info.fileSize)
+    }
+
+    /**
+     * Fallback path discovery: list /maps and each subdirectory via `files json` (recycling the
+     * Files browser's listing), collect the real `.hwmap` paths, and read the one whose basename
+     * matches the loaded map (or the only one present). This is why the Files page works and the
+     * old reconstruct-the-path approach didn't: the device tells us the real names.
+     */
+    private fun discoverMapDownload() {
+        mapReadPurpose = MAP_READ_DISCOVER // blocks re-entry + the GPS poll while we browse
+        mapDiscoverDirs.clear()
+        mapDiscoverFound.clear()
+        mapDiscoverCurrentDir = "/maps"
+        ble.sendCaptured("files json ${q("/maps")}", TAG_MAP_DISCOVER)
+    }
+
+    private fun onMapDiscoverCapture(text: String, timedOut: Boolean) {
+        if (mapReadPurpose != MAP_READ_DISCOVER) return // cancelled / disconnected
+        if (!timedOut) {
+            com.hardwareone.console.ble.FileListing.parse(text)?.takeIf { it.success }?.entries?.forEach { e ->
+                val full = joinPath(mapDiscoverCurrentDir, e.name)
+                when {
+                    e.isDir && mapDiscoverCurrentDir == "/maps" -> mapDiscoverDirs.addLast(full) // one level deep
+                    !e.isDir && e.name.lowercase().endsWith(".hwmap") -> mapDiscoverFound.add(full)
+                }
+            }
+        } else if (mapDiscoverCurrentDir == "/maps") {
+            // Couldn't even list /maps — this session lacks the Secure Channel + admin for fileread.
+            mapReadPurpose = MAP_READ_NONE
+            _mapDownload.value = _mapDownload.value?.copy(
+                finished = true,
+                error = "Map files need the Secure Channel and an admin login.",
+            )
+            return
+        }
+        val nextDir = mapDiscoverDirs.removeFirstOrNull()
+        if (nextDir != null) {
+            mapDiscoverCurrentDir = nextDir
+            ble.sendCaptured("files json ${q(nextDir)}", TAG_MAP_DISCOVER)
+            return
+        }
+        // Directory walk done — pick the best real path and read it.
+        val info = _mapInfo.value
+        val picked = mapDiscoverFound.firstOrNull { it.substringAfterLast('/').equals(info?.filename, ignoreCase = true) }
+            ?: mapDiscoverFound.firstOrNull()
+        mapReadPurpose = MAP_READ_NONE
+        if (picked == null) {
+            _mapDownload.value = _mapDownload.value?.copy(
+                finished = true,
+                error = "Couldn't find the loaded map's .hwmap file under /maps.",
+            )
+        } else {
+            startMapRead(picked, MAP_READ_MAP, info?.fileSize ?: 0)
+        }
+    }
+
+    fun cancelMapDownload() {
+        if (mapReadPurpose != MAP_READ_NONE) mapReadPurpose = MAP_READ_NONE
+        _mapDownload.value = null
+    }
+
+    fun dismissMapDownload() { _mapDownload.value = null }
+
+    /** Queue the rendered map's cached bytes for the phone's "Save as" picker. */
+    fun saveMapToPhone() {
+        val info = _mapInfo.value?.takeIf { it.valid } ?: return
+        val f = mapCacheFile(resolveMapPath(info), info.fileSize)
+        if (!f.exists()) { _mapsNotice.value = "Download the map first."; return }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { f.readBytes() }.getOrNull()?.let { _downloadReady.value = info.filename to it }
+        }
+    }
+
+    // One map-read window request. `bin` asks the device to ship the chunk as a raw binary
+    // Secure-Channel frame (no base64) followed by a JSON header (enc:"raw"). A device that
+    // doesn't support it just replies base64 as before, so it's safe to always request.
+    // Clear any held body first: on a retry/re-request an orphan from the timed-out or
+    // cross-claimed prior reply must not be paired with this window's header. The real body
+    // arrives only after this command round-trips, so it always lands after this clear.
+    private fun requestMapWindow(offset: Long) {
+        ble.clearBinaryBody()
+        ble.sendCaptured("fileread ${q(mapReadPath)} $offset $MAP_READ_WINDOW bin", TAG_MAP_READ)
+    }
+
+    private fun startMapRead(path: String, purpose: Int, expectedSize: Long = 0) {
+        // Never clobber a DIFFERENT in-flight transfer (same-purpose restarts are the candidate
+        // fallback and loadMapTrack's pre-claimed slot).
+        if (mapReadPurpose != MAP_READ_NONE && mapReadPurpose != purpose) return
+        mapReadPath = path
+        mapReadOffset = 0L
+        mapReadRetried = false
+        mapReadPurpose = purpose
+        mapReadExpected = expectedSize
+        mapReadBuf.reset()
+        if (purpose == MAP_READ_MAP) {
+            _mapDownload.value = com.hardwareone.console.ble.FileTransfer(
+                path.substringAfterLast('/'), 0, expectedSize, upload = false,
+            )
+        }
+        requestMapWindow(0)
+    }
+
+    private fun onMapReadCapture(text: String, timedOut: Boolean) {
+        val purpose = mapReadPurpose
+        if (purpose == MAP_READ_NONE) return // cancelled
+        if (timedOut) {
+            if (purpose == MAP_READ_SIDECAR) {
+                // A timeout (vs. a "not found" reply) means fileread isn't answering this session
+                // at all — needs Secure Channel + admin. Stop the background probing entirely.
+                mapSidecarUnavailable = true
+                mapSidecarCandidates.clear()
+                mapReadPurpose = MAP_READ_NONE
+                return
+            }
+            if (!mapReadRetried) { // one retry per window — BLE hiccups are common mid-transfer
+                mapReadRetried = true
+                requestMapWindow(mapReadOffset)
+            } else {
+                failMapRead("No reply — map files need the Secure Channel and an admin login.")
+            }
+            return
+        }
+        val r = com.hardwareone.console.ble.FileReadChunk.parse(text)
+            ?: run { failMapRead("Unexpected file-read reply."); return }
+        if (!r.success) { failMapRead(r.error ?: "Read failed."); return }
+        // Correlation guard: a late reply from a timed-out window (or one cross-claimed from the
+        // Files page's identical loop) must not be appended. Re-request the current window — the
+        // stale reply consumed our armed capture, so just dropping it would stall the transfer.
+        if (r.offset != mapReadOffset || (r.path.isNotEmpty() && r.path != mapReadPath)) {
+            requestMapWindow(mapReadOffset)
+            return
+        }
+        mapReadRetried = false
+        val bytes: ByteArray = when (r.enc) {
+            "raw" -> {
+                // The chunk's bytes arrived as a separate raw binary frame just before this JSON header.
+                if (r.len == 0) ByteArray(0)
+                else {
+                    val body = ble.consumeBinaryBody()
+                    if (body == null || body.size != r.len) {
+                        // Body frame dropped or size-mismatched — re-request this window rather than
+                        // append a short/garbled chunk (mirrors the correlation-guard retry above).
+                        requestMapWindow(mapReadOffset)
+                        return
+                    }
+                    body
+                }
+            }
+            "b64" -> runCatching { android.util.Base64.decode(r.data, android.util.Base64.DEFAULT) }.getOrDefault(ByteArray(0))
+            else -> r.data.toByteArray(Charsets.UTF_8)
+        }
+        mapReadBuf.write(bytes)
+        mapReadOffset += r.len
+        if (purpose == MAP_READ_MAP) {
+            _mapDownload.value = _mapDownload.value?.copy(done = mapReadOffset, total = r.size)
+        }
+        if (r.eof || r.len == 0) {
+            mapReadPurpose = MAP_READ_NONE
+            finishMapRead(purpose, mapReadPath, mapReadBuf.toByteArray())
+        } else {
+            requestMapWindow(mapReadOffset)
+        }
+    }
+
+    private fun failMapRead(msg: String) {
+        val purpose = mapReadPurpose
+        mapReadPurpose = MAP_READ_NONE
+        when (purpose) {
+            MAP_READ_MAP -> {
+                // Nothing read yet and another candidate path remains → try it (loose /maps-root
+                // maps live at a different path than the canonical layout).
+                val next = if (mapReadBuf.size() == 0) mapReadCandidates.removeFirstOrNull() else null
+                when {
+                    next != null -> startMapRead(next, MAP_READ_MAP, mapReadExpected)
+                    // All reconstructed guesses 404'd — discover the real path by browsing /maps
+                    // (once). Only when nothing was read yet; a mid-transfer failure is a real error.
+                    mapReadBuf.size() == 0 && !mapDiscoverTried -> { mapDiscoverTried = true; discoverMapDownload() }
+                    else -> _mapDownload.value = _mapDownload.value?.copy(finished = true, error = msg)
+                }
+            }
+            MAP_READ_SIDECAR -> tryNextSidecar() // older maps have no sidecar — quietly fall back
+            MAP_READ_TRACK -> _mapsNotice.value = "Track read failed: $msg"
+        }
+    }
+
+    private fun finishMapRead(purpose: Int, path: String, raw: ByteArray) {
+        when (purpose) {
+            MAP_READ_MAP -> viewModelScope.launch(Dispatchers.Default) {
+                val info = _mapInfo.value
+                val parsed = com.hardwareone.console.ble.HwMapFile.parse(raw)
+                if (parsed == null) {
+                    _mapDownload.value = _mapDownload.value?.copy(finished = true, error = "Not a valid HWMAP v6 map file.")
+                    return@launch
+                }
+                _mapFile.value = parsed
+                _mapFilePath.value = path
+                _mapDownload.value = null
+                if (info != null) {
+                    runCatching {
+                        val f = mapCacheFile(path, info.fileSize)
+                        f.parentFile?.mkdirs()
+                        f.writeBytes(raw)
+                    }
+                }
+                // The mapRead* machine is main-confined — hop back before starting the sidecar read.
+                kotlinx.coroutines.withContext(Dispatchers.Main) { refreshWaypointSidecar() }
+            }
+            MAP_READ_SIDECAR -> {
+                val sc = com.hardwareone.console.ble.WaypointSidecar.parse(String(raw, Charsets.UTF_8))
+                if (sc == null) tryNextSidecar() else _mapWaypoints.value = sc.enrich(_mapWaypoints.value)
+            }
+            MAP_READ_TRACK -> {
+                val t = com.hardwareone.console.ble.GpsTrack.parse(path.substringAfterLast('/'), String(raw, Charsets.UTF_8))
+                if (t.points.isEmpty()) {
+                    _mapsNotice.value = "No GPS data found in ${path.substringAfterLast('/')}."
+                } else {
+                    _mapTrack.value = t
+                    _mapLiveTracking.value = false
+                    val b = _mapInfo.value?.takeIf { it.valid }
+                    if (b != null) {
+                        val cov = (t.coverage(b.minLat, b.minLon, b.maxLat, b.maxLon) * 100).toInt()
+                        _mapsNotice.value = when {
+                            cov > 90 -> "Track loaded (${t.points.size} points, $cov% on map)."
+                            cov >= 50 -> "Track loaded — only $cov% of it is on this map."
+                            else -> "Track loaded, but it's outside this map's bounds ($cov% visible)."
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Waypoints (text-scrape list as index truth; sidecar JSON enriches notes/files) ---
+
+    fun refreshMapWaypoints() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        if (waypointScrapeJob?.isActive == true) return // one `waypoint list` scrape at a time
+        waypointScrapeJob = viewModelScope.launch {
+            val wps = scrapeWaypointList() ?: return@launch
+            _mapWaypoints.value = wps
+            _mapTarget.value = wps.firstOrNull { it.isTarget }?.index ?: -1
+            refreshWaypointSidecar()
+        }
+    }
+
+    /** Collect the `waypoint list` text reply: header "Waypoints (n/16):" then one row per slot.
+     *  On a plaintext link the whole multi-line reply arrives as ONE emission (only the secure
+     *  path line-splits), so every emission is split on '\n' before matching. */
+    private suspend fun scrapeWaypointList(): List<com.hardwareone.console.ble.Waypoint>? =
+        kotlinx.coroutines.coroutineScope {
+            val rows = mutableListOf<com.hardwareone.console.ble.Waypoint>()
+            var expected = -1
+            val collector = launch {
+                ble.incoming.collect { raw ->
+                    for (l in raw.split('\n')) {
+                        val line = l.trimEnd()
+                        if (expected < 0) {
+                            com.hardwareone.console.ble.WaypointText.parseHeader(line)?.let { expected = it }
+                        } else {
+                            com.hardwareone.console.ble.WaypointText.parseRow(line)?.let { rows.add(it) }
+                        }
+                    }
+                }
+            }
+            ble.sendCommand("waypoint list")
+            kotlinx.coroutines.withTimeoutOrNull(2_000L) {
+                while (expected < 0 || rows.size < expected) kotlinx.coroutines.delay(50)
+            }
+            collector.cancel()
+            if (expected < 0) null else rows.toList()
+        }
+
+    private fun refreshWaypointSidecar() {
+        val info = _mapInfo.value?.takeIf { it.valid } ?: return
+        if (mapSidecarUnavailable) return // fileread not available to this session — see field doc
+        if (mapReadPurpose != MAP_READ_NONE) return // don't preempt a running transfer
+        val dir = resolveMapPath(info).substringBeforeLast('/')
+        mapSidecarCandidates.clear()
+        // Same probe order as the firmware's WaypointManager::loadWaypoints, incl. the legacy
+        // bare-name fallback; loose /maps-root maps keep their sidecar at the root.
+        mapSidecarCandidates.add("$dir/waypoints_${info.base}.hwmap.json")
+        mapSidecarCandidates.add("$dir/waypoints_${info.base}.json")
+        mapSidecarCandidates.add("$dir/waypoints.json")
+        if (dir != "/maps") {
+            mapSidecarCandidates.add("/maps/waypoints_${info.base}.hwmap.json")
+            mapSidecarCandidates.add("/maps/waypoints_${info.base}.json")
+        }
+        tryNextSidecar()
+    }
+
+    private fun tryNextSidecar() {
+        val next = mapSidecarCandidates.removeFirstOrNull() ?: return
+        startMapRead(next, MAP_READ_SIDECAR)
+    }
+
+    /**
+     * Send a text-reply map verb and surface its verdict line ("Error: …" always terminal).
+     * Serialized under [mapScrapeMutex] — the console stream has no command↔reply correlation,
+     * so two live scrapes would both claim the first matching line. A reply that outlives its
+     * own scrape's timeout can still be claimed by the next serialized scrape; full correlation
+     * would need a firmware-side reply tag the CLI contract doesn't provide.
+     */
+    private suspend fun sendAndScrape(command: String, prefixes: List<String>, timeoutMs: Long): String? =
+        mapScrapeMutex.withLock {
+            kotlinx.coroutines.coroutineScope {
+                var result: String? = null
+                val collector = launch {
+                    ble.incoming.collect { raw ->
+                        // Plaintext links deliver multi-line replies as one emission — split first.
+                        for (l in raw.split('\n')) {
+                            val line = l.trim()
+                            if (result == null && (line.startsWith("Error:") || prefixes.any { line.startsWith(it) })) {
+                                result = line
+                            }
+                        }
+                    }
+                }
+                ble.sendCommand(command)
+                kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+                    while (result == null) kotlinx.coroutines.delay(50)
+                }
+                collector.cancel()
+                result
+            }
+        }
+
+    private fun mapVerb(command: String, okPrefix: String, timeoutMs: Long = 3_000, reload: Boolean = true) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        viewModelScope.launch {
+            _mapsNotice.value = sendAndScrape(command, listOf(okPrefix), timeoutMs) ?: "No reply."
+            if (reload) refreshMapWaypoints()
+        }
+    }
+
+    private fun fmt6(v: Double): String = String.format(java.util.Locale.US, "%.6f", v)
+
+    /** Firmware-style sanitize: printable ASCII, no double quote (tokenizer can't carry one). */
+    private fun sanitizeWpText(s: String): String = s.filter { it.code in 32..126 && it != '"' }.trim()
+
+    fun addWaypoint(lat: Double, lon: Double, name: String, notes: String = "") {
+        if (connectionState.value !is ConnectionState.Ready) return
+        val nm = sanitizeWpText(name).take(11).ifEmpty { "WP" }
+        viewModelScope.launch {
+            val line = sendAndScrape("waypoint add ${fmt6(lat)} ${fmt6(lon)} ${q(nm)}", listOf("Added waypoint"), 3_000)
+            _mapsNotice.value = line ?: "No reply."
+            val idx = line?.let { Regex("""Added waypoint (\d+)""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+            val nt = sanitizeWpText(notes).take(255)
+            if (idx != null && nt.isNotEmpty()) {
+                sendAndScrape("waypoint notes $idx $nt", listOf("Set notes"), 2_500)
+            }
+            refreshMapWaypoints()
+        }
+    }
+
+    fun deleteWaypoint(index: Int) = mapVerb("waypoint del $index", "Deleted waypoint")
+    fun gotoWaypoint(index: Int) = mapVerb("waypoint goto $index", "Navigation target")
+    fun clearWaypointTarget() = mapVerb("waypoint clear", "Navigation target")
+    fun clearAllWaypoints() = mapVerb("waypoint clearall", "All waypoints")
+
+    fun renameWaypoint(index: Int, name: String) {
+        val nm = sanitizeWpText(name).take(11)
+        if (nm.isEmpty()) return
+        mapVerb("waypoint rename $index $nm", "Renamed waypoint")
+    }
+
+    fun setWaypointNotes(index: Int, notes: String) {
+        val nt = sanitizeWpText(notes).take(255)
+        if (nt.isEmpty()) {
+            // `waypoint notes <idx>` with no text is rejected by the firmware (usage error), so
+            // notes can't be cleared over the CLI — surface that instead of the raw usage error.
+            _mapsNotice.value = "This firmware can't clear notes over the CLI — enter some text."
+            return
+        }
+        mapVerb("waypoint notes $index $nt", "Set notes")
+    }
+
+    /** Waypoint export in the web page's JSON shape (client-side file, saved via the picker). */
+    fun exportWaypoints() {
+        val wps = _mapWaypoints.value
+        if (wps.isEmpty()) { _mapsNotice.value = "No waypoints to export."; return }
+        val arr = org.json.JSONArray()
+        for (w in wps) {
+            arr.put(
+                org.json.JSONObject()
+                    .put("name", w.name).put("lat", w.lat).put("lon", w.lon).put("notes", w.notes),
+            )
+        }
+        val o = org.json.JSONObject()
+            .put("waypoints", arr)
+            .put("exportedAt", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+                .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.format(java.util.Date()))
+            .put("version", 1)
+        val base = _mapInfo.value?.takeIf { it.valid }?.base ?: "map"
+        _downloadReady.value = "waypoints_$base.json" to o.toString(2).toByteArray(Charsets.UTF_8)
+    }
+
+    /** Re-add waypoints from an exported JSON (web export or firmware sidecar shape). */
+    fun importWaypoints(text: String) {
+        val sc = com.hardwareone.console.ble.WaypointSidecar.parse(text)
+        if (sc == null || sc.waypoints.isEmpty()) { _mapsNotice.value = "Not a waypoints JSON file."; return }
+        if (connectionState.value !is ConnectionState.Ready) return
+        viewModelScope.launch {
+            var added = 0
+            for (w in sc.waypoints) {
+                val nm = sanitizeWpText(w.name).take(11).ifEmpty { "WP" }
+                val line = sendAndScrape("waypoint add ${fmt6(w.lat)} ${fmt6(w.lon)} ${q(nm)}", listOf("Added waypoint"), 3_000)
+                if (line != null && line.startsWith("Added waypoint")) {
+                    added++
+                    val idx = Regex("""Added waypoint (\d+)""").find(line)?.groupValues?.get(1)?.toIntOrNull()
+                    val nt = sanitizeWpText(w.notes).take(255)
+                    if (idx != null && nt.isNotEmpty()) sendAndScrape("waypoint notes $idx $nt", listOf("Set notes"), 2_500)
+                } else if (line != null && line.contains("No free waypoint slots")) {
+                    break
+                }
+            }
+            _mapsNotice.value = "Imported $added waypoint(s)."
+            refreshMapWaypoints()
+        }
+    }
+
+    // --- Device map management ---
+
+    fun deviceLoadMap(path: String) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        viewModelScope.launch {
+            // mapload pre-warms the device's PSRAM tile cache — give it a generous window.
+            _mapsNotice.value = sendAndScrape("mapload ${q(path)}", listOf("Loaded:"), 10_000) ?: "No reply."
+            loadMaps()
+        }
+    }
+
+    fun deviceUnloadMap() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        viewModelScope.launch {
+            _mapsNotice.value = sendAndScrape("mapunload", listOf("Map unloaded"), 4_000) ?: "No reply."
+            loadMaps()
+        }
+    }
+
+    /** Move loose .hwmap files at /maps into per-map folders (`maporganize`). */
+    fun organizeMaps() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        viewModelScope.launch {
+            _mapsNotice.value = sendAndScrape("maporganize", listOf("Map organize:"), 5_000) ?: "No reply."
+            loadMaps()
+        }
+    }
+
+    /** Upload a .hwmap from the phone (≤256 KB BLE cap), then organize it into /maps/<base>/. */
+    fun uploadMapFile(name: String, bytes: ByteArray) {
+        if (!name.endsWith(".hwmap")) { _mapsNotice.value = "Pick a .hwmap file."; return }
+        if (rejectQuotedName(name)) return
+        // uploadFile() silently no-ops when busy/disconnected — pre-check so the refusal is
+        // visible, and clear any stale finished transfer so the watcher below can only ever
+        // match THIS upload (a stale same-name success would fake-complete instantly).
+        if (connectionState.value !is ConnectionState.Ready) { _mapsNotice.value = "Not connected."; return }
+        if (_filesBusy.value) { _mapsNotice.value = "Another file transfer is in progress — try again."; return }
+        _fileTransfer.value = null
+        uploadFile("/maps/$name", bytes)
+        val started = _fileTransfer.value
+        if (started == null || started.name != name || started.finished) return // refused or failed instantly
+        viewModelScope.launch {
+            val done = kotlinx.coroutines.withTimeoutOrNull(600_000L) {
+                _fileTransfer.first { it != null && it.name == name && it.finished }
+            }
+            if (done != null && done.error == null) {
+                sendAndScrape("maporganize", listOf("Map organize:"), 5_000)
+                loadMaps()
+                dismissTransfer()
+                _mapsNotice.value = "Uploaded $name and organized it into /maps/."
+            }
+        }
+    }
+
+    // --- GPS (map page poll + live-track accumulation) ---
+
+    /** Poll `gpsread json`. Backs off permanently (until the next [loadMaps]) after 3 straight
+     *  misses so a GPS-less device isn't spammed with unknown commands. */
+    fun pollMapsGps() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        if (mapGpsMisses >= 3) return
+        // Don't queue polls behind an in-flight windowed transfer: a congested window that
+        // times out would hand its late reply to the queued gpsread capture (and vice versa).
+        if (mapReadPurpose != MAP_READ_NONE) return
+        ble.sendCaptured("gpsread json", TAG_MAP_GPS)
+    }
+
+    private fun onMapGpsCapture(text: String, timedOut: Boolean) {
+        if (timedOut || text.isBlank()) { mapGpsMisses++; return }
+        val fix = com.hardwareone.console.ble.GpsFix.parse(text) ?: run { mapGpsMisses++; return }
+        mapGpsMisses = 0
+        _mapGps.value = fix
+        if (_mapLiveTracking.value && fix.valid && fix.fix) appendLiveTrackPoint(fix)
+    }
+
+    /** Toggle the GPS sensor itself (the OLED map's GPS menu equivalent). */
+    fun setMapsGpsPower(on: Boolean) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCommand(if (on) "opengps" else "closegps")
+        mapGpsMisses = 0
+    }
+
+    private fun appendLiveTrackPoint(fix: com.hardwareone.console.ble.GpsFix) {
+        val last = liveTrackPoints.lastOrNull()
+        // Same dedupe the firmware's live tracker uses: skip points < 2 m apart; cap 10 000.
+        if (last != null && com.hardwareone.console.ble.MapGeo.distanceM(last.lat, last.lon, fix.lat, fix.lon) < 2.0) return
+        if (liveTrackPoints.size >= 10_000) return
+        liveTrackPoints.add(com.hardwareone.console.ble.TrackPoint(System.currentTimeMillis() / 1000.0, fix.lat, fix.lon))
+        _mapTrack.value = com.hardwareone.console.ble.GpsTrack("live", liveTrackPoints.toList())
+    }
+
+    // --- GPS tracks ---
+
+    /** List candidate track files (admin): the same dirs the device's interfaces scan. */
+    fun loadMapTrackFiles() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        if (_mapTrackFilesLoading.value) return
+        _mapTrackFilesLoading.value = true
+        mapTrackDirDenied = false
+        mapTrackDirs.clear()
+        mapTrackDirs.addAll(listOf("/logging_captures", "/logging_captures/tracks", "/logging_captures/sensors"))
+        mapTrackFilesTmp.clear()
+        nextMapTrackDir()
+    }
+
+    private fun nextMapTrackDir() {
+        val dir = mapTrackDirs.removeFirstOrNull()
+        if (dir == null) {
+            _mapTrackFiles.value = mapTrackFilesTmp.toList()
+            _mapTrackFilesLoading.value = false
+            if (mapTrackFilesTmp.isEmpty()) {
+                // `files json` is admin-only and its denial is plain text the capture never
+                // claims — a timeout on every dir means "needs admin", not "no logs".
+                _mapsNotice.value = if (mapTrackDirDenied) {
+                    "Couldn't list device logs — Secure Channel + admin login required."
+                } else {
+                    "No log files found in /logging_captures."
+                }
+            }
+            return
+        }
+        mapTrackCurrentDir = dir
+        ble.sendCaptured("files json ${q(dir)}", TAG_MAP_TRACKDIR)
+    }
+
+    private fun onMapTrackDirCapture(text: String, timedOut: Boolean) {
+        if (timedOut) {
+            mapTrackDirDenied = true
+        } else {
+            com.hardwareone.console.ble.FileListing.parse(text)?.takeIf { it.success }?.entries?.forEach { e ->
+                val n = e.name.lowercase()
+                if (!e.isDir && (n.endsWith(".csv") || n.endsWith(".log") || n.endsWith(".txt"))) {
+                    mapTrackFilesTmp.add(joinPath(mapTrackCurrentDir, e.name))
+                }
+            }
+        }
+        nextMapTrackDir()
+    }
+
+    /** Load a track: point the DEVICE at it (validation parity) and fetch it for local rendering. */
+    fun loadMapTrack(path: String) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        if (mapReadPurpose != MAP_READ_NONE) { _mapsNotice.value = "Another map transfer is in progress."; return }
+        // Claim the transfer slot NOW: the scrape below suspends for seconds, during which a
+        // second tap (or the background sidecar fetch) would otherwise pass the guard and
+        // interleave two windowed reads into one buffer. startMapRead re-sets the same purpose.
+        mapReadPurpose = MAP_READ_TRACK
+        viewModelScope.launch {
+            // "Loaded " (with space) — the gpstrack reply is "Loaded N GPS points"; a bare
+            // "Loaded" would also claim mapload's "Loaded: <file>" from a concurrent verb.
+            sendAndScrape("gpstrack load ${q(path)}", listOf("Loaded "), 5_000)?.let { _mapsNotice.value = it }
+            startMapRead(path, MAP_READ_TRACK)
+        }
+    }
+
+    fun deleteMapTrackFile(path: String) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCommand("filedelete ${q(path)} confirm")
+        viewModelScope.launch { kotlinx.coroutines.delay(600); loadMapTrackFiles() }
+    }
+
+    fun clearMapTrack() {
+        _mapTrack.value = null
+        _mapLiveTracking.value = false
+        liveTrackPoints.clear()
+        if (connectionState.value is ConnectionState.Ready) ble.sendCommand("gpstrack clear")
+    }
+
+    /**
+     * Live tracking, replicated from the OLED flow: open GPS, arm the sensor logger at 1 Hz to
+     * /logging_captures/tracks/live.csv, and accumulate a local track from the GPS poll. (The
+     * device's in-RAM live buffer isn't reachable over the CLI, so the app builds its own.)
+     */
+    fun startLiveTrack() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        liveTrackPoints.clear()
+        _mapTrack.value = null
+        _mapLiveTracking.value = true
+        mapGpsMisses = 0
+        ble.sendCommand("opengps")
+        ble.sendCommand("sensorlog format track")
+        ble.sendCommand("sensorlog sensors gps")
+        ble.sendCommand("sensorlog start /logging_captures/tracks/live.csv 1000")
+        _mapsNotice.value = "Live tracking on — device logs to /logging_captures/tracks/live.csv."
+    }
+
+    fun stopLiveTrack() {
+        _mapLiveTracking.value = false
+        if (connectionState.value is ConnectionState.Ready) ble.sendCommand("sensorlog stop")
+        _mapsNotice.value = "Live tracking stopped."
+    }
+
+    /** Export the currently shown track as CSV to the phone. */
+    fun exportMapTrack() {
+        val t = _mapTrack.value ?: run { _mapsNotice.value = "No track to export."; return }
+        val sb = StringBuilder("# GPS Track\n# time,lat,lon\n")
+        for (p in t.points) {
+            sb.append(if (p.timeS.isNaN()) "0" else p.timeS.toLong().toString())
+                .append(',').append(fmt6(p.lat)).append(',').append(fmt6(p.lon)).append('\n')
+        }
+        _downloadReady.value = "track-${t.name.ifEmpty { "export" }}.csv" to sb.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    /** Stitch several device log files into one track (`gpstrackmerge`, admin; max 9 inputs). */
+    fun mergeMapTracks(output: String, inputs: List<String>) {
+        if (connectionState.value !is ConnectionState.Ready || inputs.isEmpty()) return
+        if (rejectQuotedName(output)) return
+        if (inputs.size > 9) {
+            _mapsNotice.value = "The device stitches at most 9 files — deselect ${inputs.size - 9}."
+            return
+        }
+        val cmd = "gpstrackmerge ${q(output)} " + inputs.joinToString(" ") { q(it) }
+        // The whole command must fit one secure frame; long track filenames blow the budget well
+        // before 9 inputs. Oversized sends are rejected app-side with a console-only error the
+        // scrape can't see, so check up front.
+        if (cmd.toByteArray(Charsets.UTF_8).size > ble.secureCommandCapacity()) {
+            _mapsNotice.value = "Too many long file names for one BLE command — select fewer files."
+            return
+        }
+        viewModelScope.launch {
+            _mapsNotice.value = sendAndScrape(cmd, listOf("Stitched"), 10_000) ?: "No reply."
+            loadMapTrackFiles()
+        }
+    }
+
+    // --- Persisted device map settings (admin: mapzoom / maplayers / mapcachekb) ---
+
+    fun setDeviceMapZoom(zoom: Float) =
+        mapVerb("mapzoom ${String.format(java.util.Locale.US, "%.2f", zoom)}", "mapZoom set", reload = false)
+
+    fun setDeviceMapLayers(mask: Int) =
+        mapVerb("maplayers $mask", "mapVisibleLayers set", reload = false)
+
+    fun setDeviceMapCacheKb(kb: Int) =
+        mapVerb("mapcachekb $kb", "mapCacheSizeKB set", reload = false)
 
     // --- On-device LLM chat ----------------------------------------------------------
 
@@ -1913,5 +2753,24 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_EN_REMOTE_ACK = "enremoteack"
         const val TAG_EN_FILES_ACK = "enfilesack"
         const val TAG_EN_FETCH_ACK = "enfetchack"
+        const val TAG_MAP_INFO = "mapinfo"
+        const val TAG_MAP_LIST = "maplistj"
+        const val TAG_MAP_GPS = "mapgps"
+        const val TAG_MAP_READ = "mapread"
+        const val TAG_MAP_DISCOVER = "mapdiscover"
+        const val TAG_MAP_TRACKDIR = "maptrackdir"
+
+        // Windowed fileread for map/sidecar/track fetches. Must match the Files page's proven
+        // 2048: the fileread REPLY is JSON with the window base64-encoded (4:3 expansion) plus a
+        // ~150-byte envelope, and the firmware caps a single command result at ~4 KB. A 4096-byte
+        // window produced a ~5.6 KB reply that the device truncated to 4095 bytes — the JSON
+        // arrived unterminated, failed to parse, and the download could never complete. 2048 →
+        // ~2.9 KB reply, safely under the cap on every firmware build.
+        const val MAP_READ_WINDOW = 2048
+        const val MAP_READ_NONE = 0
+        const val MAP_READ_MAP = 1
+        const val MAP_READ_SIDECAR = 2
+        const val MAP_READ_TRACK = 3
+        const val MAP_READ_DISCOVER = 4 // browsing /maps to find the real map path
     }
 }

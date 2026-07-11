@@ -121,31 +121,39 @@ class SecureChannel(private val psk: ByteArray) {
     // caller's reply timeout re-requests the page (the device resends it under a fresh msgId).
     // app→device is unchanged (still one unframed command per frame; we add no header outbound).
 
-    private class Reasm(val fragCount: Int, val startedMs: Long) {
+    /** A fully reassembled device→app message. [binary] is true for a ver=0x02 frame: an opaque
+     *  byte blob (e.g. a `fileread … bin` chunk) that must NOT be UTF-8-decoded or console-echoed. */
+    data class Assembled(val bytes: ByteArray, val binary: Boolean)
+
+    private class Reasm(val fragCount: Int, val binary: Boolean, val startedMs: Long) {
         val parts = arrayOfNulls<ByteArray>(fragCount)
         var have = 0
     }
     private val reasm = HashMap<Int, Reasm>()
 
     /**
-     * Parse one decrypted device→app frame and reassemble. Returns the complete message bytes once
-     * its last fragment arrives, else null (fragment buffered, or the frame is invalid/duplicate).
+     * Parse one decrypted device→app frame and reassemble. Returns the complete message once its
+     * last fragment arrives, else null (fragment buffered, or the frame is invalid/duplicate).
+     * The frame's `ver` byte (0x01 text / 0x02 binary) is carried through to [Assembled.binary].
      * [nowMs] is a monotonic clock used to expire partials whose missing fragment never arrives.
      */
-    fun reassemble(plaintext: ByteArray, nowMs: Long): ByteArray? {
+    fun reassemble(plaintext: ByteArray, nowMs: Long): Assembled? {
         if (reasm.isNotEmpty()) reasm.values.removeAll { nowMs - it.startedMs > REASM_TTL_MS }
 
-        if (plaintext.size < FRAME_HEADER_LEN || plaintext[0] != FRAME_VER) return null
+        if (plaintext.size < FRAME_HEADER_LEN) return null
+        val ver = plaintext[0]
+        if (ver != FRAME_VER && ver != FRAME_VER_BIN) return null
+        val binary = ver == FRAME_VER_BIN
         val msgId = (plaintext[1].toInt() and 0xff) or ((plaintext[2].toInt() and 0xff) shl 8)
         val fragIdx = plaintext[3].toInt() and 0xff
         val fragCount = plaintext[4].toInt() and 0xff
         if (fragCount < 1 || fragIdx >= fragCount) return null
         val payload = plaintext.copyOfRange(FRAME_HEADER_LEN, plaintext.size)
-        if (fragCount == 1) return payload // single-frame message — no buffering needed
+        if (fragCount == 1) return Assembled(payload, binary) // single-frame — no buffering needed
 
         var buf = reasm[msgId]
         if (buf == null || buf.fragCount != fragCount) {
-            buf = Reasm(fragCount, nowMs).also { reasm[msgId] = it }
+            buf = Reasm(fragCount, binary, nowMs).also { reasm[msgId] = it }
         }
         if (buf.parts[fragIdx] == null) { buf.parts[fragIdx] = payload; buf.have++ }
         if (buf.have < fragCount) return null
@@ -157,7 +165,7 @@ class SecureChannel(private val psk: ByteArray) {
             p ?: return null
             System.arraycopy(p, 0, out, off, p.size); off += p.size
         }
-        return out
+        return Assembled(out, buf.binary)
     }
 
     private fun nonce(dir: Int, counter: Long): ByteArray = ByteArray(12).also { n ->
@@ -175,7 +183,9 @@ class SecureChannel(private val psk: ByteArray) {
         const val T_DATA: Byte = 0x10
 
         // Device→app frame header: [ver][msgId lo][msgId hi][fragIdx][fragCount].
+        // ver 0x01 = text reply; ver 0x02 = raw binary blob (opaque bytes, no UTF-8 decode).
         const val FRAME_VER: Byte = 0x01
+        const val FRAME_VER_BIN: Byte = 0x02
         private const val FRAME_HEADER_LEN = 5
         private const val REASM_TTL_MS = 5_000L
 

@@ -81,9 +81,11 @@ data class FileStats(val total: Long, val used: Long, val free: Long, val usageP
     }
 }
 
-/** `fileread "<path>" <offset> <len>` → one bounded window of a file (path is a quoted token). */
+/** `fileread "<path>" <offset> <len>` → one bounded window of a file (path is a quoted token).
+ *  [path]/[offset] echo the request, letting read loops reject a late or cross-claimed window. */
 data class FileReadChunk(
     val success: Boolean,
+    val path: String,
     val size: Long,
     val offset: Long,
     val len: Int,
@@ -97,10 +99,11 @@ data class FileReadChunk(
             val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
             if (!o.has("success")) return null
             if (!o.optBoolean("success", false)) {
-                return FileReadChunk(false, 0, 0, 0, true, "utf8", "", o.optString("error").ifEmpty { "error" })
+                return FileReadChunk(false, o.optString("path"), 0, 0, 0, true, "utf8", "", o.optString("error").ifEmpty { "error" })
             }
             return FileReadChunk(
                 success = true,
+                path = o.optString("path"),
                 size = o.optLong("size"),
                 offset = o.optLong("offset"),
                 len = o.optInt("len"),

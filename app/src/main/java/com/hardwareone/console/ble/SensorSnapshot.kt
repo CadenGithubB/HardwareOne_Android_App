@@ -74,7 +74,7 @@ data class SensorSnapshot(
         // Plumbing/meta keys we never want to show as a reading row (state lives at the entry
         // level; timestamps/seqs are noise).
         private val HIDDEN_KEYS = setOf(
-            "valid", "enabled", "connected", "ts", "timestamp", "seq", "agems",
+            "valid", "enabled", "connected", "ts", "timestamp", "seq", "age", "agems",
             "init", "initialized",
         )
 

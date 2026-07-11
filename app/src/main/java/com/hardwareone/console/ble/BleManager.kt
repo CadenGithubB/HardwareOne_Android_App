@@ -510,6 +510,22 @@ class BleManager(context: Context) {
     private fun scheduleHandshakeTimeout() = handler.postDelayed(handshakeTimeout, HANDSHAKE_TIMEOUT_MS)
     private fun cancelHandshakeTimeout() = handler.removeCallbacks(handshakeTimeout)
 
+    // Raw-binary reply plumbing (a `fileread … bin` chunk). The firmware sends the file bytes as a
+    // ver=0x02 binary frame IMMEDIATELY BEFORE the JSON header (enc:"raw") that describes them, so we
+    // stash the blob here and the consumer pairs it with that header. Written on the BLE callback
+    // thread, read once from the (main-confined) capture consumer — @Volatile for cross-thread
+    // visibility. Only one `bin` read is ever in flight (transfers are strictly sequential).
+    private val pendingBinaryBody = java.util.concurrent.atomic.AtomicReference<ByteArray?>(null)
+
+    /** Take and clear the most recent raw-binary Secure-Channel body (see [pendingBinaryBody]).
+     *  getAndSet makes the read-and-clear atomic so a concurrent write can't be silently dropped. */
+    fun consumeBinaryBody(): ByteArray? = pendingBinaryBody.getAndSet(null)
+
+    /** Drop any held raw-binary body. The map loop calls this before each window request so an
+     *  orphan left by a timed-out/mismatched prior window can never be mis-paired with a later
+     *  header; also called on disconnect. */
+    fun clearBinaryBody() { pendingBinaryBody.set(null) }
+
     // --- Inbound (notifications) ----------------------------------------------------
 
     private fun handleNotification(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
@@ -538,10 +554,16 @@ class BleManager(context: Context) {
             // firmware framing); it surfaces only once its last fragment arrives.
             val msg = ch.reassemble(pt, android.os.SystemClock.elapsedRealtime())
             if (msg != null) {
-                val s = String(msg, Charsets.UTF_8)
-                // Terminate the message so appendSecureRx emits its final line now (each reassembled
-                // message is a complete unit — no cross-message buffering).
-                appendSecureRx(if (s.endsWith("\n")) s else s + "\n")
+                if (msg.binary) {
+                    // Raw binary blob (a `fileread … bin` chunk). Hold it for the JSON header
+                    // (enc:"raw") that follows — never UTF-8-decode or console-echo opaque bytes.
+                    pendingBinaryBody.set(msg.bytes)
+                } else {
+                    val s = String(msg.bytes, Charsets.UTF_8)
+                    // Terminate the message so appendSecureRx emits its final line now (each reassembled
+                    // message is a complete unit — no cross-message buffering).
+                    appendSecureRx(if (s.endsWith("\n")) s else s + "\n")
+                }
             }
         } else {
             // Diagnostic: a RESPONSE we couldn't decrypt while secured. Distinguish a
@@ -719,8 +741,17 @@ class BleManager(context: Context) {
     private fun cancelCapture() {
         handler.removeCallbacks(captureQuietFlush)
         handler.removeCallbacks(captureTimeout)
+        val armed = captureTag
         captureTag = null
-        synchronized(captureLock) { captureBuf.setLength(0); pendingCaptures.clear() }
+        val queued = synchronized(captureLock) {
+            captureBuf.setLength(0)
+            pendingCaptures.toList().also { pendingCaptures.clear() }
+        }
+        // Deliver a timed-out Capture for the armed tag and every queued request instead of
+        // dropping them silently — multi-step consumers (the windowed fileread loops, busy
+        // flags) unwind through their existing timeout paths rather than wedging until app kill.
+        armed?.let { _captures.tryEmit(Capture(it, "", timedOut = true)) }
+        queued.forEach { _captures.tryEmit(Capture(it.tag, "", timedOut = true)) }
     }
 
     private fun updateAuthFromReply(text: String) {
@@ -958,6 +989,7 @@ class BleManager(context: Context) {
         handler.removeCallbacks(idleFlush)
         channel = null
         secureEstablished = false
+        clearBinaryBody()  // don't let a half-received binary body survive into the next connection
         synchronized(rxLock) { rxBuffer.clear() }
         synchronized(opLock) { opQueue.clear(); opInFlight = false }
         if (hasConnectPermission()) gatt?.close()

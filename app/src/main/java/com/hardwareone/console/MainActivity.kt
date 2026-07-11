@@ -46,6 +46,7 @@ import com.hardwareone.console.ui.FilesScreen
 import com.hardwareone.console.ui.HeaderNav
 import com.hardwareone.console.ui.LlmChatScreen
 import com.hardwareone.console.ui.LoginDialog
+import com.hardwareone.console.ui.MapsScreen
 import com.hardwareone.console.ui.LogViewerScreen
 import com.hardwareone.console.ui.SavedLogsScreen
 import com.hardwareone.console.ui.SensorsScreen
@@ -86,6 +87,7 @@ class MainActivity : FragmentActivity() {
         data object Files : Screen
         data object EspNow : Screen
         data object Automations : Screen
+        data object Maps : Screen
         data object EspNowConfig : Screen
         data object EspNowBond : Screen
         data class EspNowDevice(val mac: String, val name: String) : Screen
@@ -183,6 +185,7 @@ class MainActivity : FragmentActivity() {
                         Screen.Files -> "Files"
                         Screen.EspNow -> "ESP-NOW"
                         Screen.Automations -> "Automations"
+                        Screen.Maps -> "Maps"
                         else -> "Devices"
                     },
                     onOpenDevices = onOpenDevices,
@@ -192,6 +195,10 @@ class MainActivity : FragmentActivity() {
                     onOpenFiles = ({ vm.loadFiles("/"); openTool(Screen.Files) }).takeIf { current != Screen.Files },
                     onOpenEspNow = ({ openTool(Screen.EspNow) }).takeIf { current != Screen.EspNow },
                     onOpenAutomations = ({ vm.loadAutomations(); openTool(Screen.Automations) }).takeIf { current != Screen.Automations },
+                    // No eager load here (unlike Files/Automations): the Screen.Maps branch's
+                    // RESUMED loop loads on entry, and a double loadMaps() would run two
+                    // concurrent `waypoint list` scrapes against the shared console stream.
+                    onOpenMaps = ({ openTool(Screen.Maps) }).takeIf { current != Screen.Maps },
                     onSyncClock = vm::syncClock,
                     onSaveLog = onSaveLog,
                     onClearLog = onClearLog,
@@ -433,6 +440,24 @@ class MainActivity : FragmentActivity() {
                         AutomationsScreen(
                             vm = vm,
                             nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Automations),
+                        )
+                    }
+
+                    Screen.Maps -> {
+                        // GPS position poll (5 s like the web page; 2 s while live tracking so the
+                        // local track keeps up). Backs off automatically on GPS-less devices.
+                        LaunchedEffect(Unit) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                vm.loadMaps()
+                                while (true) {
+                                    vm.pollMapsGps()
+                                    kotlinx.coroutines.delay(if (vm.mapLiveTracking.value) 2_000 else 5_000)
+                                }
+                            }
+                        }
+                        MapsScreen(
+                            vm = vm,
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Maps),
                         )
                     }
 
