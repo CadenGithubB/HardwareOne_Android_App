@@ -23,3 +23,6 @@ keystore.properties
 
 # Gradle wrapper dist cache
 /gradle/wrapper/dists/
+
+# Scratch / analysis outputs (not part of the app)
+dead-code-candidates.csv
