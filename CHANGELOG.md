@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com) and this project uses
 [Semantic Versioning](https://semver.org).
 
+## [2.6.0] — 2026-07-11
+
+Offline maps: view, search, and navigate the device's map on the phone — no internet, no Google.
+
+### Added
+- **Offline map viewer.** Downloads the device's loaded `.hwmap` vector map over the Secure Channel
+  and renders it natively on the phone (roads, water, parks, buildings, rail/bus/ferry, land) — fully
+  offline, no online tiles or Google services. Touch-first: drag to pan, pinch to zoom, two-finger
+  rotate, with the OLED map mode's follow-GPS behavior.
+- **Layers, search, and transit.** Per-type layer toggles, feature-name search with result cycling,
+  and a list of the map's named transit routes — tap any to locate it.
+- **Waypoints.** Add (including long-press-to-drop), rename, note, set as nav target, import/export,
+  and clear — synced to the device over the same CLI.
+- **GPS & tracks.** Live position with a location context bar ("On <road> • Near <area>"), live track
+  recording, device track-log listing/loading, multi-file stitching, and export.
+- **Map management.** Download/save, upload `.hwmap` files to the device, load/unload, and organize
+  `/maps/`.
+
+### Notes
+- Rendering scales to large maps (tens of thousands of features): merged, decimated per-style
+  geometry when zoomed out, switching to per-feature detail past ~5×, so panning stays smooth at
+  every zoom. BLE map uploads cap at 256 KB — use the device's web page for larger maps.
+
 ## [2.5.1] — 2026-06-28
 
 First version of a home- and lock-screen status widget.
