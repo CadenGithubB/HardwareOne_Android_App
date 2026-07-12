@@ -259,6 +259,26 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private val _mapGps = MutableStateFlow<com.hardwareone.console.ble.GpsFix?>(null)
     val mapGps: StateFlow<com.hardwareone.console.ble.GpsFix?> = _mapGps.asStateFlow()
 
+    // App-side GPS polling controls (persisted). The map's satellite HUD button flips [mapGpsUpdates];
+    // [mapGpsIntervalMs] is the poll cadence, chosen in the Maps "GPS updates" settings.
+    private val mapsPrefs = getApplication<Application>()
+        .getSharedPreferences("hw_console_prefs", android.content.Context.MODE_PRIVATE)
+    private val _mapGpsUpdates = MutableStateFlow(mapsPrefs.getBoolean("map_gps_updates", true))
+    val mapGpsUpdates: StateFlow<Boolean> = _mapGpsUpdates.asStateFlow()
+    private val _mapGpsIntervalMs = MutableStateFlow(mapsPrefs.getInt("map_gps_interval_ms", 5_000))
+    val mapGpsIntervalMs: StateFlow<Int> = _mapGpsIntervalMs.asStateFlow()
+
+    fun setMapGpsUpdates(on: Boolean) {
+        _mapGpsUpdates.value = on
+        mapsPrefs.edit().putBoolean("map_gps_updates", on).apply()
+        if (on) mapGpsMisses = 0 // re-arm the backoff so it starts polling again immediately
+    }
+
+    fun setMapGpsInterval(ms: Int) {
+        _mapGpsIntervalMs.value = ms.coerceIn(1_000, 60_000)
+        mapsPrefs.edit().putInt("map_gps_interval_ms", _mapGpsIntervalMs.value).apply()
+    }
+
     private val _mapTrack = MutableStateFlow<com.hardwareone.console.ble.GpsTrack?>(null)
     val mapTrack: StateFlow<com.hardwareone.console.ble.GpsTrack?> = _mapTrack.asStateFlow()
     private val _mapTrackFiles = MutableStateFlow<List<String>>(emptyList()) // absolute device paths
@@ -1931,7 +1951,11 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                     ble.incoming.collect { raw ->
                         // Plaintext links deliver multi-line replies as one emission — split first.
                         for (l in raw.split('\n')) {
-                            val line = l.trim()
+                            // The device wraps successful CLI replies with an "OK: " prefix over BLE,
+                            // so strip it before matching (and for display): otherwise a scrape prefix
+                            // like "Loaded:" never matches "OK: Loaded: …" and every load/unload/
+                            // organize/waypoint reply falls back to a bogus "No reply.".
+                            val line = l.trim().removePrefix("OK: ")
                             if (result == null && (line.startsWith("Error:") || prefixes.any { line.startsWith(it) })) {
                                 result = line
                             }
@@ -2100,6 +2124,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     /** Poll `gpsread json`. Backs off permanently (until the next [loadMaps]) after 3 straight
      *  misses so a GPS-less device isn't spammed with unknown commands. */
     fun pollMapsGps() {
+        if (!_mapGpsUpdates.value) return // GPS updates toggled off (satellite HUD button)
         if (connectionState.value !is ConnectionState.Ready) return
         if (mapGpsMisses >= 3) return
         // Don't queue polls behind an in-flight windowed transfer: a congested window that

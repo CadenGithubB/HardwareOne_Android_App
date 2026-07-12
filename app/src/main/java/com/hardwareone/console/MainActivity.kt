@@ -444,14 +444,20 @@ class MainActivity : FragmentActivity() {
                     }
 
                     Screen.Maps -> {
-                        // GPS position poll (5 s like the web page; 2 s while live tracking so the
-                        // local track keeps up). Backs off automatically on GPS-less devices.
+                        // GPS position poll. Cadence is the user's "GPS updates" interval (2 s floor
+                        // while live tracking so the local track keeps up). Skips while the satellite
+                        // toggle is off; backs off automatically on GPS-less devices.
                         LaunchedEffect(Unit) {
                             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                                 vm.loadMaps()
                                 while (true) {
-                                    vm.pollMapsGps()
-                                    kotlinx.coroutines.delay(if (vm.mapLiveTracking.value) 2_000 else 5_000)
+                                    if (vm.mapGpsUpdates.value) {
+                                        vm.pollMapsGps()
+                                        val base = vm.mapGpsIntervalMs.value.toLong()
+                                        kotlinx.coroutines.delay(if (vm.mapLiveTracking.value) minOf(base, 2_000L) else base)
+                                    } else {
+                                        kotlinx.coroutines.delay(800) // idle — re-check the toggle soon
+                                    }
                                 }
                             }
                         }

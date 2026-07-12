@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,9 +21,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -49,10 +53,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -136,6 +145,8 @@ fun MapsScreen(vm: ConsoleViewModel, nav: HeaderNav) {
     val waypoints by vm.mapWaypoints.collectAsState()
     val target by vm.mapTarget.collectAsState()
     val gps by vm.mapGps.collectAsState()
+    val gpsUpdates by vm.mapGpsUpdates.collectAsState()
+    val gpsInterval by vm.mapGpsIntervalMs.collectAsState()
     val track by vm.mapTrack.collectAsState()
     val trackFiles by vm.mapTrackFiles.collectAsState()
     val live by vm.mapLiveTracking.collectAsState()
@@ -321,8 +332,10 @@ fun MapsScreen(vm: ConsoleViewModel, nav: HeaderNav) {
                             ctx = locationCtx,
                             navTarget = waypoints.firstOrNull { it.index == target },
                             gpsPos = gps?.takeIf { it.valid && it.fix }?.let { it.lat to it.lon },
+                            selectionName = selectedName,
                             selectionCount = selectionIndices.size,
                             selectionCursor = selectionCursor,
+                            gpsUpdates = gpsUpdates,
                             onPrevResult = {
                                 if (selectionIndices.isNotEmpty()) {
                                     selectionCursor = (selectionCursor - 1 + selectionIndices.size) % selectionIndices.size
@@ -336,15 +349,14 @@ fun MapsScreen(vm: ConsoleViewModel, nav: HeaderNav) {
                                 }
                             },
                             onClearSelection = { selectedName = null },
-                            onCenterGps = {
-                                view.manuallyPanned = false
-                                val g = gps
-                                if (g != null && g.valid && g.fix && m.contains(g.lat, g.lon)) {
-                                    view.centerRelLat = m.relLat(g.lat)
-                                    view.centerRelLon = m.relLon(g.lon)
-                                }
+                            onToggleGps = {
+                                val on = !gpsUpdates
+                                vm.setMapGpsUpdates(on)
+                                // Turning updates on resumes GPS auto-follow (recenters on the next
+                                // fix); a manual pan then stops the follow again while updates flow.
+                                if (on) view.manuallyPanned = false
                             },
-                            onRecenter = { view.reset() },
+                            onSearchSelect = { select(it) },
                         )
                     }
                 } else {
@@ -469,45 +481,6 @@ fun MapsScreen(vm: ConsoleViewModel, nav: HeaderNav) {
                         LegendDot(Color(0xFFFF3333)); Text("GPS", color = hw.muted, style = MaterialTheme.typography.labelSmall)
                         LegendDot(Color(0xFFFFD93D)); Text("Waypoint", color = hw.muted, style = MaterialTheme.typography.labelSmall)
                         LegendDot(trackColor); Text("Track", color = hw.muted, style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-
-                // ---- Search ----
-                Panel("Search") {
-                    if (m == null) {
-                        Text("Download the map to search its features.", color = hw.muted, style = MaterialTheme.typography.bodyMedium)
-                    } else {
-                        var query by remember(m) { mutableStateOf("") }
-                        OutlinedTextField(
-                            value = query,
-                            onValueChange = { query = it },
-                            label = { Text("Road, water, park…") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = mapsFieldColors(),
-                        )
-                        val results = remember(query, m) { m.searchNames(query) }
-                        results.forEach { name ->
-                            Text(
-                                name,
-                                color = if (name == selectedName) hw.accent else hw.onGradient,
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.fillMaxWidth().clickable { select(name) }.padding(vertical = 6.dp),
-                            )
-                        }
-                        if (query.length >= 2 && results.isEmpty()) {
-                            Text("No matches found", color = hw.muted, style = MaterialTheme.typography.bodyMedium)
-                        }
-                        selectedName?.let { sel ->
-                            val cur = selectionIndices.getOrNull(selectionCursor)
-                            if (cur != null) {
-                                val f = m.features[cur]
-                                InfoRow("Selected", sel)
-                                InfoRow("Type", MapFeatureType.label(f.type))
-                                InfoRow("Segments", "${selectionCursor + 1}/${selectionIndices.size}")
-                                InfoRow("Position", "%.6f, %.6f".format(m.centerLat + f.pts[0], m.centerLon + f.pts[1]))
-                            }
-                        }
                     }
                 }
 
@@ -663,8 +636,36 @@ fun MapsScreen(vm: ConsoleViewModel, nav: HeaderNav) {
                     m?.let {
                         InfoRow("Parsed features", it.features.size.toString())
                         InfoRow("Named features", it.names.size.toString())
-                        InfoRow("Zoom", "%.1f×".format(view.zoom))
-                        InfoRow("Rotation", "${view.rotationDeg.toInt()}°")
+                    }
+                }
+
+                // ---- GPS updates (app-side polling over BLE) ----
+                Panel("GPS updates") {
+                    Text(
+                        "How often the app reads your position from the device over Bluetooth. The " +
+                            "satellite button on the map toggles this on and off too.",
+                        color = hw.muted, style = MaterialTheme.typography.labelSmall,
+                    )
+                    SwitchRow("Poll GPS over Bluetooth", gpsUpdates) {
+                        vm.setMapGpsUpdates(it)
+                        if (it) view.manuallyPanned = false // resume follow when re-enabled
+                    }
+                    Text("Update rate", color = hw.muted, style = MaterialTheme.typography.labelSmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(2_000 to "2s", 5_000 to "5s", 10_000 to "10s", 30_000 to "30s").forEach { (ms, lbl) ->
+                            val sel = gpsInterval == ms
+                            Text(
+                                lbl,
+                                color = hw.onGradient,
+                                style = MaterialTheme.typography.labelLarge,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (sel) hw.accent else Color.Transparent)
+                                    .then(if (sel) Modifier else Modifier.border(1.dp, hw.muted, RoundedCornerShape(6.dp)))
+                                    .clickable { vm.setMapGpsInterval(ms) }
+                                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                            )
+                        }
                     }
                 }
 
@@ -835,59 +836,68 @@ private fun androidx.compose.foundation.layout.BoxScope.MapHud(
     ctx: HwMapFile.Context?,
     navTarget: Waypoint?,
     gpsPos: Pair<Double, Double>?,
+    selectionName: String?,
     selectionCount: Int,
     selectionCursor: Int,
+    gpsUpdates: Boolean,
     onPrevResult: () -> Unit,
     onNextResult: () -> Unit,
     onClearSelection: () -> Unit,
-    onCenterGps: () -> Unit,
-    onRecenter: () -> Unit,
+    onToggleGps: () -> Unit,
+    onSearchSelect: (String) -> Unit,
 ) {
     val hw = LocalHwColors.current
 
-    // Top strip: context bar (or region name) left, zoom/rotation right.
+    // Top strip: search button + GPS context (left, with a search field that expands below the
+    // button), zoom/angle/sats (right). Top-aligned so the search field grows downward.
+    var searchOpen by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
     Row(
         Modifier.align(Alignment.TopStart).fillMaxWidth().padding(6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
     ) {
-        val ctxText = when {
-            gpsFix && ctx != null && (ctx.road != null || ctx.area != null) -> buildString {
-                ctx.road?.let { append("On $it") }
-                ctx.area?.let {
-                    if (isNotEmpty()) append(" • ")
-                    append("Near $it")
-                    if (ctx.areaDistanceM < 500) append(" (${ctx.areaDistanceM.toInt()}m)")
-                }
+        Column(Modifier.weight(1f, fill = false), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                HudSearchButton(active = searchOpen) { searchOpen = !searchOpen }
+                // GPS-updates toggle sits next to search so the two icon buttons read as a group.
+                HudSatelliteButton(active = gpsUpdates, hasFix = gpsFix, onClick = onToggleGps)
+                // GPS context only ("On <road> • Near <area>"); the generic region name is gone —
+                // the search button took its place.
+                val gpsCtx = if (gpsFix && ctx != null && (ctx.road != null || ctx.area != null)) buildString {
+                    ctx.road?.let { append("On $it") }
+                    ctx.area?.let {
+                        if (isNotEmpty()) append(" • ")
+                        append("Near $it")
+                        if (ctx.areaDistanceM < 500) append(" (${ctx.areaDistanceM.toInt()}m)")
+                    }
+                } else null
+                HudChip(gpsCtx ?: "", visible = gpsCtx != null, modifier = Modifier.weight(1f, fill = false))
             }
-            else -> map.regionName.ifEmpty { null }
+            if (searchOpen) {
+                HudSearchField(
+                    map = map,
+                    query = searchQuery,
+                    onQueryChange = { searchQuery = it },
+                    onSelect = { onSearchSelect(it); searchOpen = false; searchQuery = "" },
+                )
+            }
         }
-        HudChip(ctxText ?: "", visible = !ctxText.isNullOrEmpty(), modifier = Modifier.weight(1f, fill = false))
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            HudChip("%.1f×".format(view.zoom), visible = view.zoom != 1f)
-            HudChip("${view.rotationDeg.toInt()}°", visible = view.rotationDeg.toInt() != 0)
+            HudChip("%.1f×".format(view.zoom), visible = true, onClick = { view.zoom = 1f })
+            HudChip("${view.rotationDeg.toInt()}°", visible = true, onClick = { view.rotationDeg = 0f })
             HudChip("${gpsSats}S", visible = gpsSats != null, tint = if (gpsFix) hw.success else hw.muted)
         }
     }
+    // Pan / zoom / rotate are gesture-only (drag, pinch, two-finger twist); the zoom/angle chips
+    // up top tap to reset. The GPS toggle now lives next to search in the top strip.
 
-    // Right-side control stack (web top-left control bar, thumb-reachable here).
-    Column(
-        Modifier.align(Alignment.CenterEnd).padding(6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        HudButton("+") { view.zoomIn() }
-        HudButton("−") { view.zoomOut() }
-        HudButton("↺") { view.rotateBy(-15f) }
-        HudButton("↻") { view.rotateBy(15f) }
-        HudButton("⟲") { onRecenter() }
-        HudButton("◎", tint = if (gpsFix) hw.success else hw.muted) { onCenterGps() }
-    }
-
-    // Bottom strip: LIVE + nav readout left, search-result cycler right.
+    // Bottom strip: LIVE + nav readout left, selected-feature panel right (name + X, with a
+    // segment cycler below it when the selection spans more than one segment).
     Row(
         Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Bottom,
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             HudChip("LIVE", visible = live, tint = LocalHwColors.current.danger)
@@ -900,20 +910,55 @@ private fun androidx.compose.foundation.layout.BoxScope.MapHud(
             }
             HudChip(navReadout ?: "", visible = navReadout != null)
         }
-        if (selectionCount > 1) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                HudButton("‹", onClick = onPrevResult)
-                HudChip("${selectionCursor + 1}/$selectionCount", visible = true)
-                HudButton("›", onClick = onNextResult)
+        if (selectionCount >= 1) {
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                // The segment cycler sits above the name so the name (and its ✕) stay pinned to
+                // the bottom edge next to nothing else.
+                if (selectionCount > 1) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        HudButton("‹", onClick = onPrevResult)
+                        HudChip("${selectionCursor + 1}/$selectionCount", visible = true)
+                        HudButton("›", onClick = onNextResult)
+                    }
+                }
+                // Name of the selected feature + an inline ✕. Tapping the ✕ clears everything —
+                // name, cycler, and the map pinpoint — back to nothing-selected.
+                Row(
+                    Modifier.clip(RoundedCornerShape(6.dp)).background(Color(0xB3000000)),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        selectionName ?: "Selected",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 168.dp).padding(start = 8.dp, top = 4.dp, bottom = 4.dp),
+                    )
+                    Text(
+                        "✕",
+                        color = Color.White.copy(alpha = 0.85f),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.clip(CircleShape).clickable(onClick = onClearSelection)
+                            .padding(horizontal = 7.dp, vertical = 4.dp),
+                    )
+                }
             }
-        } else if (selectionCount == 1) {
-            HudButton("✕", onClick = onClearSelection)
         }
     }
 }
 
 @Composable
-private fun HudChip(text: String, visible: Boolean, tint: Color? = null, modifier: Modifier = Modifier) {
+private fun HudChip(
+    text: String,
+    visible: Boolean,
+    tint: Color? = null,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null, // when set, the chip is tappable (e.g. tap zoom/angle to reset)
+) {
     if (!visible) return
     Text(
         text,
@@ -923,6 +968,7 @@ private fun HudChip(text: String, visible: Boolean, tint: Color? = null, modifie
         modifier = modifier
             .clip(RoundedCornerShape(6.dp))
             .background(Color(0xB3000000))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 6.dp, vertical = 3.dp),
     )
 }
@@ -934,6 +980,165 @@ private fun HudButton(text: String, tint: Color = Color.White, onClick: () -> Un
         contentAlignment = Alignment.Center,
     ) {
         Text(text, color = tint, style = MaterialTheme.typography.titleMedium)
+    }
+}
+
+// --- Pixel-art HUD glyphs --------------------------------------------------------------------
+
+// Hand-placed monochrome pixel glyphs in the spirit of the firmware map tool's custom shape
+// buttons — not emoji or vector icons. '1' = filled cell; grids may be any width×height.
+
+// Magnifying glass (13×13): a centered hollow ring with a short handle, inset from the corners so
+// it can render as large as the satellite inside the circular button without the handle clipping.
+private val MAGNIFIER_PIXELS = listOf(
+    "0000000000000",
+    "0001111000000",
+    "0010000100000",
+    "0100000010000",
+    "0100000010000",
+    "0100000010000",
+    "0010000110000",
+    "0001111011000",
+    "0000000011100",
+    "0000000001100",
+    "0000000000000",
+    "0000000000000",
+    "0000000000000",
+)
+
+// Satellite (13×13): antenna mast + crossbars, a central body, and solar wings joined by a
+// full-width boom — one connected shape (no floating pixels) that fills the button.
+private val SATELLITE_PIXELS = listOf(
+    "0000001000000",
+    "0000001000000",
+    "0001111111000",
+    "0000001000000",
+    "0000011100000",
+    "0000011100000",
+    "1111111111111",
+    "1111111111111",
+    "0000011100000",
+    "0000011100000",
+    "0000001000000",
+    "0001111111000",
+    "0000001000000",
+)
+
+@Composable
+private fun PixelGlyph(rows: List<String>, color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val nRows = rows.size
+        val nCols = rows.maxOf { it.length }
+        val cell = minOf(size.width / nCols, size.height / nRows)
+        val ox = (size.width - cell * nCols) / 2f // center the glyph in its box
+        val oy = (size.height - cell * nRows) / 2f
+        rows.forEachIndexed { r, row ->
+            row.forEachIndexed { c, ch ->
+                if (ch == '1') {
+                    drawRect(color, topLeft = Offset(ox + c * cell, oy + r * cell), size = Size(cell, cell))
+                }
+            }
+        }
+    }
+}
+
+/** Round HUD button carrying the pixel magnifier; accent-filled when the search field is open. */
+@Composable
+private fun HudSearchButton(active: Boolean, onClick: () -> Unit) {
+    val hw = LocalHwColors.current
+    Box(
+        Modifier.size(34.dp).clip(CircleShape)
+            .background(if (active) hw.accent else Color(0xB3000000))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        PixelGlyph(
+            rows = MAGNIFIER_PIXELS,
+            color = if (active) hw.onGradient else Color.White,
+            modifier = Modifier.size(30.dp), // matches the satellite glyph so the two buttons pair
+        )
+    }
+}
+
+/**
+ * Round HUD button carrying the pixel satellite; toggles GPS updates over BLE. Dark when off,
+ * accent when on, green once there's a fix.
+ */
+@Composable
+private fun HudSatelliteButton(active: Boolean, hasFix: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val hw = LocalHwColors.current
+    // Off = dark; on-but-acquiring = yellow; on-with-fix = green. The bright fills need a dark glyph.
+    val bg = when {
+        !active -> Color(0xB3000000)
+        hasFix -> hw.success
+        else -> Color(0xFFFAB005)
+    }
+    Box(
+        modifier.size(34.dp).clip(CircleShape).background(bg).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        PixelGlyph(
+            rows = SATELLITE_PIXELS,
+            color = if (active) Color(0xEE121212) else Color.White,
+            modifier = Modifier.size(30.dp),
+        )
+    }
+}
+
+/** In-map name search: a compact HUD text field + tappable results, wired to [onSelect]. */
+@Composable
+private fun HudSearchField(
+    map: HwMapFile,
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onSelect: (String) -> Unit,
+) {
+    val hw = LocalHwColors.current
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    val results = remember(query, map) { map.searchNames(query) }
+    Column(
+        Modifier.width(212.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xD9000000)).padding(4.dp),
+        verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+        BasicTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            singleLine = true,
+            textStyle = MaterialTheme.typography.labelMedium.copy(color = Color.White),
+            cursorBrush = SolidColor(hw.accent),
+            modifier = Modifier.fillMaxWidth().focusRequester(focus).padding(horizontal = 6.dp, vertical = 6.dp),
+            decorationBox = { inner ->
+                if (query.isEmpty()) {
+                    Text(
+                        "Search roads, water, parks…",
+                        color = Color.White.copy(alpha = 0.45f),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                    )
+                }
+                inner()
+            },
+        )
+        when {
+            results.isNotEmpty() -> results.take(8).forEach { name ->
+                Text(
+                    name,
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp))
+                        .clickable { onSelect(name) }
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                )
+            }
+            query.trim().length >= 2 -> Text(
+                "No matches",
+                color = Color.White.copy(alpha = 0.45f),
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+            )
+        }
     }
 }
 
