@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com) and this project uses
 [Semantic Versioning](https://semver.org).
 
+## [2.6.2] — 2026-07-12
+
+Bigger Bluetooth uploads, and long transfers no longer die when the screen sleeps.
+
+### Changed
+- **Bluetooth file uploads are no longer capped at 256 KB.** An upload is now allowed as long as it
+  fits in the device's free storage, matching the web uploader. Large files still transfer slowly
+  over Bluetooth — the device's web page is much faster for big files.
+- **The screen stays awake during a file transfer.** While a file is uploading or downloading over
+  Bluetooth (map downloads included), the screen no longer times out — previously it could sleep,
+  background the app, and drop the transfer. Normal screen timeout resumes the moment it finishes,
+  and this now applies on every screen rather than only the map view.
+
 ## [2.6.1] — 2026-07-11
 
 Streamlines the offline-map viewer's on-screen controls and fixes a stale status line.

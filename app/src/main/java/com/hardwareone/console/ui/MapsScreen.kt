@@ -152,17 +152,8 @@ fun MapsScreen(vm: ConsoleViewModel, nav: HeaderNav) {
     val live by vm.mapLiveTracking.collectAsState()
     val uploadTransfer by vm.fileTransfer.collectAsState()
 
-    // Keep the screen on while a map transfer is running. A full 800 KB map is ~400 windowed
-    // fileread round trips (a couple of minutes); if the screen auto-sleeps, Android backgrounds
-    // the app and drops the BLE link, aborting the transfer. Scoped to the transfer so the screen
-    // sleeps normally the rest of the time.
-    val transferActive = (download?.let { !it.finished } == true) ||
-        (uploadTransfer?.let { it.upload && it.name.endsWith(".hwmap") && !it.finished } == true)
-    val hostView = androidx.compose.ui.platform.LocalView.current
-    DisposableEffect(transferActive) {
-        hostView.keepScreenOn = transferActive
-        onDispose { hostView.keepScreenOn = false }
-    }
+    // Screen-keep-awake during any BLE file transfer (map download/upload included) is handled
+    // globally in MainActivity now, so it applies on every screen, not just this one.
 
     // --- Camera + render caches (reset when a different map file is parsed) ---
     val view = remember(map) { MapViewState() }
@@ -445,7 +436,8 @@ fun MapsScreen(vm: ConsoleViewModel, nav: HeaderNav) {
                         SecondaryButton(onClick = { vm.organizeMaps() }, text = "Organize /maps")
                     }
                     Text(
-                        "BLE uploads cap at 256 KB — use the device's web page for bigger maps.",
+                        "BLE uploads are limited only by free storage, but large maps transfer slowly — " +
+                            "the device's web page is much faster for big files.",
                         color = hw.muted, style = MaterialTheme.typography.labelSmall,
                     )
                 }

@@ -1448,10 +1448,15 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             )
             return
         }
-        if (bytes.size > 256 * 1024) {
+        // Storage-based cap (mirrors the web upload): allow anything that fits, up to 90% of the
+        // device's free space (10% headroom for filesystem metadata). Best-effort early check —
+        // the firmware is the real arbiter (its write short-writes if the volume fills). If free
+        // space isn't known yet (stats not loaded), let it through and rely on the firmware.
+        val freeBytes = _fileStats.value?.free
+        if (freeBytes != null && bytes.size.toLong() > freeBytes * 9 / 10) {
             _fileTransfer.value = com.hardwareone.console.ble.FileTransfer(
                 name, 0, bytes.size.toLong(), finished = true,
-                error = "File too large for BLE (256 KB max) — use the web browser.",
+                error = "Not enough space: ${bytes.size / 1024} KB won't fit in ${freeBytes / 1024} KB free.",
             )
             return
         }
@@ -2093,7 +2098,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Upload a .hwmap from the phone (≤256 KB BLE cap), then organize it into /maps/<base>/. */
+    /** Upload a .hwmap from the phone (limited only by free storage; slow for big files over BLE),
+     *  then organize it into /maps/<base>/. */
     fun uploadMapFile(name: String, bytes: ByteArray) {
         if (!name.endsWith(".hwmap")) { _mapsNotice.value = "Pick a .hwmap file."; return }
         if (rejectQuotedName(name)) return

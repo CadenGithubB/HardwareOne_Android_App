@@ -151,6 +151,20 @@ class MainActivity : FragmentActivity() {
                 ThemePreference.DARK -> true
             }
             HardwareOneTheme(darkTheme = darkTheme) {
+                // Keep the screen awake while a BLE file transfer is in flight. These are slow
+                // (base64, one small chunk per round-trip), and a screen timeout that dozes the app
+                // can stall or drop the transfer. Covers uploads + file downloads (filesBusy) and an
+                // in-progress map download. Cleared the instant it finishes (or the composition
+                // leaves), so the normal screen timeout resumes right after.
+                val filesBusy by vm.filesBusy.collectAsState()
+                val mapDownload by vm.mapDownload.collectAsState()
+                val keepScreenAwake = filesBusy || (mapDownload?.finished == false)
+                val localView = androidx.compose.ui.platform.LocalView.current
+                androidx.compose.runtime.DisposableEffect(keepScreenAwake) {
+                    localView.keepScreenOn = keepScreenAwake
+                    onDispose { localView.keepScreenOn = false }
+                }
+
                 BackHandler(enabled = nav.isNotEmpty() || topPage == AppPage.CONSOLE) {
                     if (nav.isNotEmpty()) navBack() else topPage = AppPage.DEVICES
                 }
