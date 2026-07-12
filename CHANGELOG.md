@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com) and this project uses
 [Semantic Versioning](https://semver.org).
 
+## [2.6.1] — 2026-07-11
+
+Streamlines the offline-map viewer's on-screen controls and fixes a stale status line.
+
+### Changed
+- **On-map controls reworked.** Feature search and GPS now live in two matching icon buttons at the
+  top of the map, and the separate Search panel is gone. Panning, zooming, and rotating are
+  gesture-only (drag, pinch, two-finger twist); the live zoom and angle chips tap to reset to 1× / 0°.
+  The old +/− / rotate / recenter buttons were removed.
+- **Selected feature is labelled.** Choosing a search result now shows its name with an ✕ to clear the
+  selection — the name, the segment cycler, and the map pin all clear together.
+
+### Added
+- **GPS updates toggle and rate.** The satellite button turns position polling over Bluetooth on and
+  off (dark when off, yellow while acquiring, green once fixed). A new "GPS updates" setting picks the
+  poll rate (2 / 5 / 10 / 30 s); both persist across launches.
+
+### Fixed
+- **Stale "No reply."** Loading a map that was already downloaded on the phone no longer shows a
+  spurious "No reply." above the rendered map.
+
 ## [2.6.0] — 2026-07-11
 
 Offline maps: view, search, and navigate the device's map on the phone — no internet, no Google.
