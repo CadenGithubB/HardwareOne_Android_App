@@ -78,12 +78,17 @@ class HeaderNav(
     val devicesLabel: String = "Devices",
     val onOpenDevices: (() -> Unit)? = null,
     val onOpenStatus: (() -> Unit)? = null,
+    val onOpenPerf: (() -> Unit)? = null,
     val onOpenSensors: (() -> Unit)? = null,
     val onOpenLlm: (() -> Unit)? = null,
     val onOpenFiles: (() -> Unit)? = null,
+    val onOpenOta: (() -> Unit)? = null,
     val onOpenEspNow: (() -> Unit)? = null,
     val onOpenAutomations: (() -> Unit)? = null,
     val onOpenMaps: (() -> Unit)? = null,
+    val onOpenCamera: (() -> Unit)? = null,
+    val onOpenMic: (() -> Unit)? = null,
+    val onOpenDeviceSettings: (() -> Unit)? = null,
     val onSyncClock: (() -> Unit)? = null,
     val onSaveLog: (() -> Unit)? = null,
     val onClearLog: (() -> Unit)? = null,
@@ -133,7 +138,7 @@ fun AppHeader(
 // in sync with MainActivity's `devicesLabel` mapping — plus "Console"). BOTH segments reserve the
 // widest of these, so the switcher is a fixed size, never resizes as you move between pages, and
 // the two segments are always the same width as each other.
-private val SWITCHER_LABELS = listOf("Devices", "Status", "Sensors", "LLM Chat", "Files", "ESP-NOW", "Maps", "Console")
+private val SWITCHER_LABELS = listOf("Devices", "Status", "Perf", "Sensors", "LLM Chat", "Files", "OTA", "ESP-NOW", "Maps", "Camera", "Mic", "Settings", "Console")
 
 @Composable
 fun PageToggle(nav: HeaderNav) {
@@ -156,12 +161,17 @@ fun PageToggle(nav: HeaderNav) {
                 DropdownMenu(expanded = devMenu, onDismissRequest = { devMenu = false }) {
                     nav.onOpenDevices?.let { go -> DropdownMenuItem(text = { Text("Devices") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenStatus?.let { go -> DropdownMenuItem(text = { Text("Status") }, onClick = { devMenu = false; go() }) }
+                    nav.onOpenPerf?.let { go -> DropdownMenuItem(text = { Text("Perf") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenSensors?.let { go -> DropdownMenuItem(text = { Text("Sensors") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenLlm?.let { go -> DropdownMenuItem(text = { Text("LLM Chat") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenFiles?.let { go -> DropdownMenuItem(text = { Text("Files") }, onClick = { devMenu = false; go() }) }
+                    nav.onOpenOta?.let { go -> DropdownMenuItem(text = { Text("OTA update") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenEspNow?.let { go -> DropdownMenuItem(text = { Text("ESP-NOW") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenAutomations?.let { go -> DropdownMenuItem(text = { Text("Automations") }, onClick = { devMenu = false; go() }) }
                     nav.onOpenMaps?.let { go -> DropdownMenuItem(text = { Text("Maps") }, onClick = { devMenu = false; go() }) }
+                    nav.onOpenCamera?.let { go -> DropdownMenuItem(text = { Text("Camera") }, onClick = { devMenu = false; go() }) }
+                    nav.onOpenMic?.let { go -> DropdownMenuItem(text = { Text("Microphone") }, onClick = { devMenu = false; go() }) }
+                    nav.onOpenDeviceSettings?.let { go -> DropdownMenuItem(text = { Text("Device settings") }, onClick = { devMenu = false; go() }) }
                     nav.onSyncClock?.let { go -> DropdownMenuItem(text = { Text("Sync clock") }, onClick = { devMenu = false; go() }) }
                 }
             } else {

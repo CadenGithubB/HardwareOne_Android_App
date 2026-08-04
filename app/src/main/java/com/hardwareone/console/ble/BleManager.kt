@@ -233,6 +233,7 @@ class BleManager(context: Context) {
         lastDevice = device
         currentName = runCatching { device.name }.getOrNull() ?: "HardwareOne"
         userInitiatedDisconnect = false
+        _secureFailure.value = null // stale failure dialog must not outlive a fresh attempt
         _authenticated.value = false
         _deviceInfo.value = DeviceInfo(name = currentName, address = device.address)
 
@@ -494,10 +495,22 @@ class BleManager(context: Context) {
                 "Check the passphrase / device secret."
     }
 
+    // Terminal secure-handshake failure, surfaced beyond the console. The console does get an
+    // error line, but the Devices page can't show it: fail() drops the link, closeGatt() nulls
+    // deviceInfo, and the connection card (the page's only status surface) disappears with it —
+    // the connect just "stops" with no explanation. The Devices page pops this in a dialog
+    // instead. Sticky until the user dismisses it or a new connect attempt starts.
+    private val _secureFailure = MutableStateFlow<String?>(null)
+    val secureFailure: StateFlow<String?> = _secureFailure.asStateFlow()
+
+    /** Devices-page failure dialog dismissed. */
+    fun dismissSecureFailure() { _secureFailure.value = null }
+
     private fun failSecure(reason: String) {
         cancelHandshakeTimeout()
         channel = null
         secureEstablished = false
+        _secureFailure.value = reason
         fail(reason)
     }
 
@@ -623,7 +636,7 @@ class BleManager(context: Context) {
     private val captureBuf = StringBuilder()
     private val pendingCaptures = ArrayDeque<CaptureReq>() // guarded by captureLock
 
-    private data class CaptureReq(val command: String, val tag: String)
+    private data class CaptureReq(val command: String, val tag: String, val timeoutMs: Long)
 
     private val captureQuietFlush = Runnable { finishCapture(timedOut = false) }
     private val captureTimeout = Runnable { finishCapture(timedOut = true) }
@@ -634,26 +647,26 @@ class BleManager(context: Context) {
      * queues behind it so each reply maps to the right tag (e.g. a `status json` poll and a
      * `devices json` request can't clobber each other's buffer).
      */
-    fun sendCaptured(command: String, tag: String) {
+    fun sendCaptured(command: String, tag: String, timeoutMs: Long = CAPTURE_TIMEOUT_MS) {
         if (_state.value !is ConnectionState.Ready) {
             _captures.tryEmit(Capture(tag, "", timedOut = true))
             return
         }
         val startNow = synchronized(captureLock) {
             if (captureTag != null) {
-                pendingCaptures.addLast(CaptureReq(command, tag)); false
+                pendingCaptures.addLast(CaptureReq(command, tag, timeoutMs)); false
             } else {
                 true
             }
         }
-        if (startNow) startCapture(command, tag)
+        if (startNow) startCapture(command, tag, timeoutMs)
     }
 
-    private fun startCapture(command: String, tag: String) {
+    private fun startCapture(command: String, tag: String, timeoutMs: Long) {
         synchronized(captureLock) { captureBuf.setLength(0) }
         captureTag = tag
         handler.removeCallbacks(captureTimeout)
-        handler.postDelayed(captureTimeout, CAPTURE_TIMEOUT_MS)
+        handler.postDelayed(captureTimeout, timeoutMs.coerceIn(CAPTURE_TIMEOUT_MS, MAX_CAPTURE_TIMEOUT_MS))
         android.util.Log.d("HW1CAP", "start tag=$tag cmd='${command.take(40)}'")
         sendCommand(command, watch = false)
     }
@@ -735,7 +748,7 @@ class BleManager(context: Context) {
         _captures.tryEmit(Capture(tag, text, timedOut = timedOut && text.isEmpty()))
         // Kick off the next queued capture, if any.
         val next = synchronized(captureLock) { pendingCaptures.removeFirstOrNull() }
-        if (next != null) startCapture(next.command, next.tag)
+        if (next != null) startCapture(next.command, next.tag, next.timeoutMs)
     }
 
     private fun cancelCapture() {
@@ -1026,6 +1039,7 @@ class BleManager(context: Context) {
         private const val PSK_WAIT_TIMEOUT_MS = 6_000L
         private const val IDLE_FLUSH_MS = 250L
         private const val CAPTURE_TIMEOUT_MS = 5_000L
+        private const val MAX_CAPTURE_TIMEOUT_MS = 60_000L
         private const val COMMAND_SILENCE_MS = 3_500L
         private const val IDLE_DISCONNECT_MS = 30 * 60 * 1000L // power-safety: drop an idle link
         private const val MAX_AUTO_RECONNECT = 3

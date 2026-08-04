@@ -6,14 +6,27 @@ import androidx.lifecycle.viewModelScope
 import com.hardwareone.console.ble.BleManager
 import com.hardwareone.console.ble.BleMessage
 import com.hardwareone.console.ble.ChatMessage
+import com.hardwareone.console.ble.CameraStatus
 import com.hardwareone.console.ble.ConnectionState
 import com.hardwareone.console.ble.DiscoveredDevice
+import com.hardwareone.console.ble.FileReadChunk
+import com.hardwareone.console.ble.ImageItem
+import com.hardwareone.console.ble.ImageListing
+import com.hardwareone.console.ble.MediaBlob
+import com.hardwareone.console.ble.MicStatus
+import com.hardwareone.console.ble.OtaBundle
+import com.hardwareone.console.ble.OtaDeviceStatus
+import com.hardwareone.console.ble.OtaStep
+import com.hardwareone.console.ble.OtaUiState
+import com.hardwareone.console.ble.RecordingItem
 import com.hardwareone.console.security.CredentialStore
 import com.hardwareone.console.security.LogVault
 import com.hardwareone.console.security.SavedLog
 import com.hardwareone.console.security.SecretBox
 import com.hardwareone.console.security.SecureChannel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -46,6 +59,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     /** Last username we attempted to log in with; committed to [_currentUser] on auth success. */
     private var pendingUser: String? = null
     val deviceInfo: StateFlow<com.hardwareone.console.ble.DeviceInfo?> = ble.deviceInfo
+    /** Secure-handshake failure reason for the Devices-page dialog (null = nothing to show). */
+    val secureFailure: StateFlow<String?> = ble.secureFailure
 
     // --- Device status page (`status json`, captured off-console) ---
     private val _deviceStatus = MutableStateFlow<com.hardwareone.console.ble.DeviceStatus?>(null)
@@ -61,6 +76,16 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     // `available` so boards with no battery hardware never show the card.
     private val _battery = MutableStateFlow<com.hardwareone.console.ble.BatteryInfo?>(null)
     val battery: StateFlow<com.hardwareone.console.ble.BatteryInfo?> = _battery.asStateFlow()
+
+    // --- Perf / memory profiler (Perf screen; mirrors the OLED Perf mode) ---
+    private val _memReport = MutableStateFlow<com.hardwareone.console.ble.MemReport?>(null)
+    val memReport: StateFlow<com.hardwareone.console.ble.MemReport?> = _memReport.asStateFlow()
+    private val _fsUsage = MutableStateFlow<com.hardwareone.console.ble.FsUsage?>(null)
+    val fsUsage: StateFlow<com.hardwareone.console.ble.FsUsage?> = _fsUsage.asStateFlow()
+    private val _perfTop = MutableStateFlow<com.hardwareone.console.ble.PerfTop?>(null)
+    val perfTop: StateFlow<com.hardwareone.console.ble.PerfTop?> = _perfTop.asStateFlow()
+    private val _taskStats = MutableStateFlow<com.hardwareone.console.ble.TaskStats?>(null)
+    val taskStats: StateFlow<com.hardwareone.console.ble.TaskStats?> = _taskStats.asStateFlow()
 
     // --- On-device LLM chat ---
     private val _llmStatus = MutableStateFlow<com.hardwareone.console.ble.LlmStatus?>(null)
@@ -118,6 +143,16 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private var writeBytes: ByteArray? = null
     private var writeOffset = 0L
     private var writeSentFinal = false
+    private enum class WriteOwner { FILE_BROWSER, OTA_FIRMWARE, OTA_MANIFEST }
+    private var writeOwner = WriteOwner.FILE_BROWSER
+
+    // --- Signed offline OTA (local .hw1ota bundle -> secure BLE -> recovery updater) ---
+    private val _ota = MutableStateFlow(OtaUiState())
+    val ota: StateFlow<OtaUiState> = _ota.asStateFlow()
+    private var otaAwaitingReturn = false
+    private var otaReconnectJob: Job? = null
+    private var otaPollJob: Job? = null
+    private var otaStatusInFlight = false
 
     // I²C device list (`devices json`), lazily loaded when the user expands the I²C card.
     // null = not loaded yet; empty list = loaded, none present.
@@ -146,6 +181,30 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _controlsLoading = MutableStateFlow<Set<String>>(emptySet())
     val controlsLoading: StateFlow<Set<String>> = _controlsLoading.asStateFlow()
+
+    // --- Camera + microphone media pages ---
+    // Live pixels/audio are HTTP-only; the app drives capture-to-file + tuning + a saved-file
+    // browser, pulling JPEG/WAV via an independent windowed binary fileread (see media-read below).
+    private val _cameraStatus = MutableStateFlow<CameraStatus?>(null)
+    val cameraStatus: StateFlow<CameraStatus?> = _cameraStatus.asStateFlow()
+    private val _gallery = MutableStateFlow<List<ImageItem>?>(null)
+    val gallery: StateFlow<List<ImageItem>?> = _gallery.asStateFlow()
+    private val _viewedImage = MutableStateFlow<MediaBlob?>(null)
+    val viewedImage: StateFlow<MediaBlob?> = _viewedImage.asStateFlow()
+
+    private val _micStatus = MutableStateFlow<MicStatus?>(null)
+    val micStatus: StateFlow<MicStatus?> = _micStatus.asStateFlow()
+    private val _micLevel = MutableStateFlow(0)
+    val micLevel: StateFlow<Int> = _micLevel.asStateFlow()
+    private val _recordings = MutableStateFlow<List<RecordingItem>?>(null)
+    val recordings: StateFlow<List<RecordingItem>?> = _recordings.asStateFlow()
+    private val _audioClip = MutableStateFlow<MediaBlob?>(null)
+    val audioClip: StateFlow<MediaBlob?> = _audioClip.asStateFlow()
+
+    private val _mediaBusy = MutableStateFlow(false)
+    val mediaBusy: StateFlow<Boolean> = _mediaBusy.asStateFlow()
+    private val _mediaError = MutableStateFlow<String?>(null)
+    val mediaError: StateFlow<String?> = _mediaError.asStateFlow()
 
     // --- ESP-NOW page (Phase 1: read-only status + peer list via the `... json` commands) ---
     private val _espNowMode = MutableStateFlow<com.hardwareone.console.ble.EspNowMode?>(null)
@@ -370,6 +429,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             ble.authenticated.collect { authed ->
                 _currentUser.value = if (authed) pendingUser else null
                 if (authed) refreshBattery() // battery may need auth — fetch right after login
+                if (authed && otaAwaitingReturn && connectionState.value is ConnectionState.Ready) {
+                    requestOtaMonitor()
+                }
             }
         }
         // Fetch battery the instant a device is Ready (no auth) so it's there on connect, not
@@ -380,8 +442,19 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             ble.state.collect { st ->
                 if (st is ConnectionState.Ready) {
                     refreshBattery()
+                    if (otaAwaitingReturn) {
+                        if (authenticated.value) requestOtaMonitor()
+                        else _ota.value = _ota.value.copy(
+                            step = OtaStep.WAITING_FOR_LOGIN,
+                            message = "Device is back. Log in to verify the OTA result.",
+                            error = null,
+                        )
+                    }
                 } else {
                     _filesBusy.value = false
+                    if (writeOwner != WriteOwner.FILE_BROWSER && writeBytes != null) {
+                        failOta("Bluetooth disconnected while the OTA package was being staged. Reconnect and restart the upload.")
+                    }
                     writeBytes = null
                     _mapsBusy.value = false
                     _mapTrackFilesLoading.value = false
@@ -390,6 +463,14 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                     if (mapReadPurpose != MAP_READ_NONE) {
                         mapReadPurpose = MAP_READ_NONE
                         _mapDownload.value = _mapDownload.value?.copy(finished = true, error = "Disconnected.")
+                    }
+                    if (otaAwaitingReturn) {
+                        _ota.value = _ota.value.copy(
+                            step = OtaStep.WAITING_FOR_DEVICE,
+                            message = "Firmware is updating. Waiting for HardwareOne to return over Bluetooth…",
+                            error = null,
+                        )
+                        ensureOtaReconnect()
                     }
                 }
             }
@@ -427,6 +508,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag.startsWith(TAG_SENSOR_READ) -> onSensorRead(tag.removePrefix(TAG_SENSOR_READ), capture.text, capture.timedOut)
                         tag == TAG_CONTROL_MODULES -> onControlModulesCapture(capture.text)
                         tag == TAG_BATTERY -> onBatteryCapture(capture.text, capture.timedOut)
+                        tag == TAG_MEMREPORT -> { if (!capture.timedOut) com.hardwareone.console.ble.MemReport.parse(capture.text)?.let { _memReport.value = it } }
+                        tag == TAG_FSUSAGE -> { if (!capture.timedOut) com.hardwareone.console.ble.FsUsage.parse(capture.text)?.let { _fsUsage.value = it } }
+                        tag == TAG_PERFTOP -> { if (!capture.timedOut) com.hardwareone.console.ble.PerfTop.parse(capture.text)?.let { _perfTop.value = it } }
+                        tag == TAG_TASKSTATS -> { if (!capture.timedOut) com.hardwareone.console.ble.TaskStats.parse(capture.text)?.let { _taskStats.value = it } }
                         tag == TAG_LLM_STATUS -> onLlmStatusCapture(capture.text)
                         tag == TAG_LLM_MODELS -> com.hardwareone.console.ble.LlmStatus.parseModels(capture.text)?.let { _llmModels.value = it }
                         tag == TAG_LLM_GEN -> onLlmGenStart(capture.text, capture.timedOut)
@@ -435,6 +520,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_FILE_STATS -> onFileStatsCapture(capture.text)
                         tag == TAG_FILE_READ -> onFileReadCapture(capture.text, capture.timedOut)
                         tag == TAG_FILE_WRITE -> onFileWriteCapture(capture.text, capture.timedOut)
+                        tag.startsWith(TAG_OTA_PREFIX) -> onOtaStatusCapture(tag, capture.text, capture.timedOut)
                         tag == TAG_EN_MODE -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowMode.parse(capture.text)?.let { _espNowMode.value = it } }
                         tag == TAG_EN_ENC -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowEnc.parse(capture.text)?.let { _espNowEnc.value = it } }
                         tag == TAG_EN_MESHROLE -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowMeshRole.parse(capture.text)?.let { _espNowMeshRole.value = it } }
@@ -459,6 +545,14 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_MAP_READ -> onMapReadCapture(capture.text, capture.timedOut)
                         tag == TAG_MAP_DISCOVER -> onMapDiscoverCapture(capture.text, capture.timedOut)
                         tag == TAG_MAP_TRACKDIR -> onMapTrackDirCapture(capture.text, capture.timedOut)
+                        tag == TAG_CAM_STATUS -> { if (!capture.timedOut) CameraStatus.parse(capture.text)?.let { _cameraStatus.value = it } }
+                        tag == TAG_IMAGES_LFS -> onImagesCapture(capture.text, "LittleFS")
+                        tag == TAG_IMAGES_SD -> onImagesCapture(capture.text, "SD")
+                        // micread json carries the live level too, so one poll updates both.
+                        tag == TAG_MIC_STATUS -> { if (!capture.timedOut) MicStatus.parse(capture.text)?.let { _micStatus.value = it; _micLevel.value = it.level } }
+                        tag == TAG_MIC_LEVEL -> { if (!capture.timedOut) MicStatus.parseLevel(capture.text)?.let { _micLevel.value = it } }
+                        tag == TAG_MIC_LIST -> { if (!capture.timedOut) RecordingItem.parse(capture.text)?.let { _recordings.value = it } }
+                        tag == TAG_MEDIA_READ -> onMediaReadCapture(capture.text, capture.timedOut)
                         tag.startsWith(TAG_CONTROLS_PREFIX) ->
                             onControlsCapture(tag.removePrefix(TAG_CONTROLS_PREFIX), capture.text)
                     }
@@ -524,6 +618,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun disconnect() = ble.disconnect()
     fun reconnect() = ble.reconnect()
+    fun dismissSecureFailure() = ble.dismissSecureFailure()
     fun readStatus() = ble.readStatus()
 
     /** Push the phone's current UTC time to the device: `timeset <epoch_seconds>`. */
@@ -579,6 +674,35 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _i2cLoading.value = false
         if (timedOut || text.isBlank()) return // keep whatever we had; user can retry
         com.hardwareone.console.ble.I2cDevice.parseList(text)?.let { _i2cDevices.value = it }
+    }
+
+    // --- Perf / memory profiler ------------------------------------------------------
+
+    /** Memory page: heap/PSRAM (`memreport json`) + filesystem (`fsusage json`). */
+    fun refreshMemory() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCaptured("memreport json", TAG_MEMREPORT)
+        ble.sendCaptured("fsusage json", TAG_FSUSAGE)
+    }
+
+    /** CPU page: loop health + per-task CPU% (`perftop json` — samples ~0.75 s on-device). */
+    fun refreshPerfCpu() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCaptured("perftop json", TAG_PERFTOP)
+    }
+
+    /** Stack page: per-task state/prio/stack min-free (`taskstats json`). */
+    fun refreshPerfStack() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCaptured("taskstats json", TAG_TASKSTATS)
+    }
+
+    /** Drop cached perf snapshots (call when leaving the Perf page). */
+    fun clearPerf() {
+        _memReport.value = null
+        _fsUsage.value = null
+        _perfTop.value = null
+        _taskStats.value = null
     }
 
     // --- ESP-NOW page ----------------------------------------------------------------
@@ -1380,6 +1504,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Stop an in-flight upload or download. Any in-flight reply is then ignored. */
     fun cancelTransfer() {
+        if (writeOwner != WriteOwner.FILE_BROWSER) {
+            cancelOtaTransfer()
+            return
+        }
         fileOpCancelled = true
         writeBytes = null
         readForDownload = false
@@ -1465,6 +1593,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         writeBytes = bytes
         writeOffset = 0L
         writeSentFinal = false
+        writeOwner = WriteOwner.FILE_BROWSER
         fileOpCancelled = false
         _filesBusy.value = true
         _fileTransfer.value = com.hardwareone.console.ble.FileTransfer(name, 0, bytes.size.toLong())
@@ -1507,21 +1636,438 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         writeOffset = r.size
-        _fileTransfer.value = _fileTransfer.value?.copy(done = r.size)
+        when (writeOwner) {
+            WriteOwner.FILE_BROWSER -> _fileTransfer.value = _fileTransfer.value?.copy(done = r.size)
+            WriteOwner.OTA_FIRMWARE -> _ota.value = _ota.value.copy(progressDone = r.size)
+            WriteOwner.OTA_MANIFEST -> _ota.value = _ota.value.copy(
+                progressDone = (_ota.value.bundle?.imageSize?.toLong() ?: 0L) + r.size,
+            )
+        }
         if (writeSentFinal || r.final) {
-            _fileTransfer.value = _fileTransfer.value?.copy(finished = true)
+            val completedOwner = writeOwner
             writeBytes = null
             _filesBusy.value = false
-            loadFiles(_filesPath.value) // refresh listing + stats
+            writeOwner = WriteOwner.FILE_BROWSER
+            when (completedOwner) {
+                WriteOwner.FILE_BROWSER -> {
+                    _fileTransfer.value = _fileTransfer.value?.copy(finished = true)
+                    loadFiles(_filesPath.value) // refresh listing + stats
+                }
+                WriteOwner.OTA_FIRMWARE -> startOtaManifestUpload()
+                WriteOwner.OTA_MANIFEST -> verifyStagedOta()
+            }
         } else {
             sendNextWriteChunk()
         }
     }
 
     private fun failWrite(msg: String) {
-        _fileTransfer.value = _fileTransfer.value?.copy(finished = true, error = msg)
+        val owner = writeOwner
         writeBytes = null
         _filesBusy.value = false
+        writeOwner = WriteOwner.FILE_BROWSER
+        if (owner == WriteOwner.FILE_BROWSER) {
+            _fileTransfer.value = _fileTransfer.value?.copy(finished = true, error = msg)
+        } else {
+            failOta(msg)
+        }
+    }
+
+    // --- Signed offline OTA -----------------------------------------------------------
+
+    /** Parse and authenticate a local .hw1ota bundle without network access. */
+    fun importOtaBundle(name: String, bytes: ByteArray) {
+        if (_ota.value.transferActive || otaAwaitingReturn) return
+        _ota.value = _ota.value.copy(
+            step = OtaStep.CHECKING_PACKAGE,
+            packageName = name,
+            bundle = null,
+            progressDone = 0,
+            progressTotal = 0,
+            message = "Checking package structure, signature, image digest, and board identity…",
+            error = null,
+        )
+        viewModelScope.launch(Dispatchers.Default) {
+            runCatching { OtaBundle.parse(bytes) }
+                .onSuccess { bundle ->
+                    val device = _ota.value.device
+                    val mismatch = device?.takeIf {
+                        it.board.isNotEmpty() && (it.board != bundle.board || it.layout != bundle.layout)
+                    }
+                    if (mismatch != null) {
+                        _ota.value = _ota.value.copy(
+                            step = OtaStep.FAILED,
+                            packageName = name,
+                            bundle = bundle,
+                            message = "Package does not match the connected HardwareOne.",
+                            error = "Package is ${bundle.board} / ${bundle.layout}; device is ${mismatch.board} / ${mismatch.layout}.",
+                        )
+                    } else {
+                        _ota.value = _ota.value.copy(
+                            step = OtaStep.READY,
+                            packageName = name,
+                            bundle = bundle,
+                            progressDone = 0,
+                            progressTotal = bundle.imageSize.toLong() + bundle.manifestJson.size,
+                            message = "Package checked locally. The device will independently verify its embedded release trust root before installing it.",
+                            error = null,
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _ota.value = _ota.value.copy(
+                        step = OtaStep.FAILED,
+                        packageName = name,
+                        bundle = null,
+                        message = "This file cannot be used for HardwareOne OTA.",
+                        error = error.message ?: "Invalid OTA package.",
+                    )
+                }
+        }
+    }
+
+    fun clearOtaPackage() {
+        if (_ota.value.transferActive || otaAwaitingReturn) return
+        _ota.value = OtaUiState(device = _ota.value.device)
+    }
+
+    fun reportOtaImportError(message: String) {
+        if (_ota.value.transferActive || otaAwaitingReturn) return
+        _ota.value = _ota.value.copy(
+            step = OtaStep.FAILED,
+            message = "The selected package could not be opened.",
+            error = message,
+        )
+    }
+
+    fun refreshOtaStatus() {
+        if (connectionState.value !is ConnectionState.Ready) {
+            _ota.value = _ota.value.copy(error = "Connect to HardwareOne to read OTA status.")
+            return
+        }
+        if (otaStatusInFlight) return
+        otaStatusInFlight = true
+        ble.sendCaptured("otastatus json", TAG_OTA_STATUS, OTA_STATUS_TIMEOUT_MS)
+    }
+
+    /** Store the recovery-only WPA2/HTTP fallback credential; never persist or console-log it. */
+    fun setOtaRecoveryPassword(value: String) {
+        if (!otaSessionReady()) return
+        if (value.length !in 12..63 || value.any { it.code !in 0x20..0x7e }) {
+            _ota.value = _ota.value.copy(error = "Recovery password must be 12–63 printable ASCII characters.")
+            return
+        }
+        _ota.value = _ota.value.copy(
+            step = OtaStep.SETTING_RECOVERY_PASSWORD,
+            message = "Saving the recovery fallback credential on the device…",
+            error = null,
+        )
+        // Deliberately bypass ConsoleViewModel.send(): credentials must never enter the log/history.
+        ble.sendCommand("otapin $value")
+        ble.sendCaptured("otastatus json", TAG_OTA_CREDENTIAL, OTA_STATUS_TIMEOUT_MS)
+    }
+
+    fun startOtaInstall() {
+        val bundle = _ota.value.bundle ?: run {
+            _ota.value = _ota.value.copy(error = "Choose a valid .hw1ota package first.")
+            return
+        }
+        val status = _ota.value.device ?: run {
+            _ota.value = _ota.value.copy(error = "Refresh device OTA status before installing.")
+            return
+        }
+        if (!otaSessionReady()) return
+        when {
+            !status.available -> failOta("This firmware does not have the native recovery OTA layout.")
+            status.board != bundle.board || status.layout != bundle.layout -> failOta(
+                "Package is ${bundle.board} / ${bundle.layout}; device is ${status.board} / ${status.layout}.",
+            )
+            !status.recoveryCredentialConfigured -> failOta("Set the recovery fallback password before installing.")
+            status.resultPending -> failOta("A prior OTA result must be reviewed and acknowledged before another update.")
+            status.phase !in OTA_STARTABLE_PHASES -> failOta("Device OTA state is '${status.phase}', so a new update cannot be started.")
+            else -> {
+                otaAwaitingReturn = false
+                otaPollJob?.cancel()
+                otaReconnectJob?.cancel()
+                _ota.value = _ota.value.copy(
+                    step = OtaStep.UPLOADING_FIRMWARE,
+                    progressDone = 0,
+                    progressTotal = bundle.imageSize.toLong() + bundle.manifestJson.size,
+                    message = "Uploading signed firmware over the secure Bluetooth channel. Keep the phone near the device.",
+                    error = null,
+                )
+                startOtaWrite("/system/ota/candidate.part", bundle.firmware, WriteOwner.OTA_FIRMWARE)
+            }
+        }
+    }
+
+    fun cancelOtaTransfer() {
+        if (!_ota.value.transferActive) return
+        fileOpCancelled = true
+        writeBytes = null
+        writeOffset = 0
+        writeOwner = WriteOwner.FILE_BROWSER
+        _filesBusy.value = false
+        _ota.value = _ota.value.copy(
+            step = OtaStep.READY,
+            progressDone = 0,
+            message = "Upload stopped. Starting again will truncate and replace the partial staging files.",
+            error = null,
+        )
+    }
+
+    fun acknowledgeOtaResult() {
+        val status = _ota.value.device ?: return
+        if (!status.resultPending || status.resultSequence <= 0 || !otaSessionReady()) return
+        _ota.value = _ota.value.copy(message = "Acknowledging OTA result ${status.resultSequence}…", error = null)
+        ble.sendCommand("otaack ${status.resultSequence} confirm")
+        otaStatusInFlight = true
+        ble.sendCaptured("otastatus json", TAG_OTA_ACK, OTA_STATUS_TIMEOUT_MS)
+    }
+
+    private fun startOtaWrite(path: String, bytes: ByteArray, owner: WriteOwner) {
+        if (bytes.isEmpty()) {
+            failOta("OTA package contains an empty staging member.")
+            return
+        }
+        writePath = path
+        writeBytes = bytes
+        writeOffset = 0
+        writeSentFinal = false
+        writeOwner = owner
+        fileOpCancelled = false
+        _filesBusy.value = true
+        sendNextWriteChunk()
+    }
+
+    private fun startOtaManifestUpload() {
+        val bundle = _ota.value.bundle ?: return failOta("OTA package was released while uploading.")
+        _ota.value = _ota.value.copy(
+            step = OtaStep.UPLOADING_MANIFEST,
+            message = "Firmware uploaded. Sending its signed manifest…",
+            error = null,
+        )
+        startOtaWrite("/system/ota/manifest.part", bundle.manifestJson, WriteOwner.OTA_MANIFEST)
+    }
+
+    private fun verifyStagedOta() {
+        _ota.value = _ota.value.copy(
+            step = OtaStep.VERIFYING_STAGED,
+            progressDone = _ota.value.progressTotal,
+            message = "Device is checking the manifest signature, image signature, digest, compatibility, and rollback policy…",
+            error = null,
+        )
+        ble.sendCommand("otastage confirm")
+        otaStatusInFlight = true
+        ble.sendCaptured("otastatus json", TAG_OTA_STAGED, OTA_LONG_STATUS_TIMEOUT_MS)
+    }
+
+    private fun armOtaUpdate() {
+        _ota.value = _ota.value.copy(
+            step = OtaStep.ARMING_RECOVERY,
+            message = "Device is revalidating the staged image and checking power safety before reboot…",
+            error = null,
+        )
+        otaAwaitingReturn = true
+        ble.sendCommand("otaupdate confirm")
+        otaStatusInFlight = true
+        ble.sendCaptured("otastatus json", TAG_OTA_ARMED, OTA_LONG_STATUS_TIMEOUT_MS)
+    }
+
+    private fun onOtaStatusCapture(tag: String, text: String, timedOut: Boolean) {
+        otaStatusInFlight = false
+        if (timedOut || text.isBlank()) {
+            if (otaAwaitingReturn) {
+                _ota.value = _ota.value.copy(
+                    step = OtaStep.WAITING_FOR_DEVICE,
+                    message = "Firmware is updating. Waiting for HardwareOne to return over Bluetooth…",
+                    error = null,
+                )
+                ensureOtaReconnect()
+            } else {
+                failOta("No JSON OTA status reply. Log in with a superadmin account and confirm this device has OTA-layout firmware.")
+            }
+            return
+        }
+        val status = OtaDeviceStatus.parse(text) ?: run {
+            failOta("Device returned an invalid OTA status document.")
+            return
+        }
+        _ota.value = _ota.value.copy(device = status)
+
+        val bundle = _ota.value.bundle
+        if (bundle != null && status.board.isNotEmpty() &&
+            (status.board != bundle.board || status.layout != bundle.layout)
+        ) {
+            failOta("Connected device identity changed and no longer matches this OTA package.")
+            return
+        }
+
+        when (tag) {
+            TAG_OTA_STATUS -> {
+                val message = when {
+                    !status.available -> "Native recovery OTA is unavailable on this firmware."
+                    status.resultPending -> "A prior OTA result is waiting for acknowledgement."
+                    !status.recoveryCredentialConfigured -> "Set a recovery fallback password before installing."
+                    bundle == null -> "Device is ready. Choose a signed .hw1ota package stored on this phone."
+                    else -> "Device and package are ready for secure Bluetooth staging."
+                }
+                val next = when {
+                    status.phase == "succeeded" -> OtaStep.SUCCEEDED
+                    status.phase == "failed" -> OtaStep.FAILED
+                    bundle != null -> OtaStep.READY
+                    else -> OtaStep.IDLE
+                }
+                _ota.value = _ota.value.copy(step = next, message = message, error = null)
+            }
+            TAG_OTA_CREDENTIAL -> {
+                if (status.recoveryCredentialConfigured) {
+                    _ota.value = _ota.value.copy(
+                        step = if (bundle != null) OtaStep.READY else OtaStep.IDLE,
+                        message = "Recovery fallback password is configured. It is not stored by the app.",
+                        error = null,
+                    )
+                } else failOta("The device did not store the recovery fallback password.")
+            }
+            TAG_OTA_STAGED -> {
+                if (status.phase == "requested" && status.candidateStaged) armOtaUpdate()
+                else failOta(status.resultDetail.ifBlank { "Device rejected the staged OTA package." })
+            }
+            TAG_OTA_ARMED -> {
+                if (status.phase == "requested") {
+                    // The device remained in the main image: most commonly its power-safety gate refused.
+                    otaAwaitingReturn = false
+                    failOta("Device did not arm recovery. Check external power/battery state, then retry.")
+                } else {
+                    _ota.value = _ota.value.copy(
+                        step = OtaStep.WAITING_FOR_DEVICE,
+                        message = "Recovery updater is installing the image. Waiting for HardwareOne to return…",
+                        error = null,
+                    )
+                    ensureOtaReconnect()
+                }
+            }
+            TAG_OTA_MONITOR -> handleOtaMonitor(status)
+            TAG_OTA_ACK -> {
+                if (status.resultPending) failOta("The OTA result is still pending; refresh and retry acknowledgement.")
+                else _ota.value = _ota.value.copy(
+                    step = if (status.phase == "succeeded") OtaStep.SUCCEEDED else OtaStep.IDLE,
+                    message = "OTA result acknowledged. The device is ready for a future update.",
+                    error = null,
+                )
+            }
+        }
+    }
+
+    private fun handleOtaMonitor(status: OtaDeviceStatus) {
+        when (status.phase) {
+            "succeeded" -> {
+                otaAwaitingReturn = false
+                otaReconnectJob?.cancel()
+                otaPollJob?.cancel()
+                _ota.value = _ota.value.copy(
+                    step = OtaStep.SUCCEEDED,
+                    progressDone = _ota.value.progressTotal,
+                    message = if (status.resultPending)
+                        "Update succeeded. Review and acknowledge result ${status.resultSequence}."
+                    else "Update succeeded and the new firmware is running.",
+                    error = null,
+                )
+            }
+            "failed", "canceled" -> {
+                otaAwaitingReturn = false
+                failOta(status.resultDetail.ifBlank { "The recovery updater reported ${status.phase}." })
+            }
+            "trial_running", "trial_boot_armed" -> {
+                _ota.value = _ota.value.copy(
+                    step = OtaStep.PROBATION,
+                    message = "New firmware is running its 60-second health probation. Keep Bluetooth connected…",
+                    error = null,
+                )
+                scheduleOtaMonitor()
+            }
+            else -> {
+                _ota.value = _ota.value.copy(
+                    step = OtaStep.WAITING_FOR_DEVICE,
+                    message = "OTA state is '${status.phase}'. Waiting for the device to finish…",
+                    error = null,
+                )
+                scheduleOtaMonitor()
+            }
+        }
+    }
+
+    private fun requestOtaMonitor() {
+        if (!otaAwaitingReturn || otaStatusInFlight || connectionState.value !is ConnectionState.Ready) return
+        if (!authenticated.value) {
+            _ota.value = _ota.value.copy(
+                step = OtaStep.WAITING_FOR_LOGIN,
+                message = "Device is back. Log in to verify the OTA result.",
+                error = null,
+            )
+            return
+        }
+        otaStatusInFlight = true
+        ble.sendCaptured("otastatus json", TAG_OTA_MONITOR, OTA_STATUS_TIMEOUT_MS)
+    }
+
+    private fun scheduleOtaMonitor() {
+        otaPollJob?.cancel()
+        otaPollJob = viewModelScope.launch {
+            delay(OTA_POLL_INTERVAL_MS)
+            requestOtaMonitor()
+        }
+    }
+
+    private fun ensureOtaReconnect() {
+        if (!otaAwaitingReturn || otaReconnectJob?.isActive == true) return
+        otaReconnectJob = viewModelScope.launch {
+            repeat(OTA_RECONNECT_ATTEMPTS) {
+                if (!otaAwaitingReturn) return@launch
+                when (connectionState.value) {
+                    ConnectionState.Disconnected, is ConnectionState.Failed -> ble.reconnect()
+                    is ConnectionState.Ready -> {
+                        requestOtaMonitor()
+                        return@launch
+                    }
+                    else -> Unit
+                }
+                delay(OTA_RECONNECT_INTERVAL_MS)
+            }
+            if (otaAwaitingReturn) {
+                otaAwaitingReturn = false
+                failOta("HardwareOne did not return over Bluetooth within three minutes. The updater may still be recoverable through its local recovery mode.")
+            }
+        }
+    }
+
+    private fun otaSessionReady(): Boolean {
+        val failure = when {
+            connectionState.value !is ConnectionState.Ready -> "Connect to HardwareOne first."
+            deviceInfo.value?.secure != true -> "OTA requires the app's encrypted Bluetooth channel."
+            !authenticated.value -> "Log in with a superadmin account before using OTA."
+            _filesBusy.value && writeOwner == WriteOwner.FILE_BROWSER -> "Finish the current file operation before starting OTA."
+            else -> null
+        }
+        if (failure != null) _ota.value = _ota.value.copy(error = failure)
+        return failure == null
+    }
+
+    private fun failOta(message: String) {
+        otaAwaitingReturn = false
+        otaStatusInFlight = false
+        otaPollJob?.cancel()
+        otaReconnectJob?.cancel()
+        writeBytes = null
+        if (writeOwner != WriteOwner.FILE_BROWSER) {
+            writeOwner = WriteOwner.FILE_BROWSER
+            _filesBusy.value = false
+        }
+        _ota.value = _ota.value.copy(
+            step = OtaStep.FAILED,
+            message = "OTA could not continue.",
+            error = message,
+        )
     }
 
     // Text-reply verbs (reply lands on the console; reload to reflect the result). Every path is a
@@ -1559,6 +2105,155 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         com.hardwareone.console.ble.ControlsModule.parse(text)?.let {
             _controls.value = _controls.value + (moduleId to it)
         }
+    }
+
+    // --- Camera + microphone media pages ------------------------------------------------
+    //
+    // Camera/mic are stream sensors: live pixels/audio only exist on the firmware's HTTP
+    // interface, never over CLI/BLE. So the app drives capture-to-file (camerasave / micrecord)
+    // + tuning (the generic `controls json` panel) + a saved-file browser. Saved JPEG/WAV files
+    // are pulled with an INDEPENDENT windowed binary `fileread` loop below — its own capture slot,
+    // so it never contends with the Files/Maps loops (all three live on separate screens). Pulling
+    // a file needs the Secure Channel + an admin login, exactly like the Files page.
+
+    private var mediaReadPath = ""
+    private var mediaReadOffset = 0L
+    private var mediaReadPurpose = MEDIA_READ_NONE
+    private var mediaReadName = ""
+    private val mediaReadBuf = java.io.ByteArrayOutputStream()
+    private val mediaReadCandidates = ArrayDeque<String>() // fallback paths (SD vs internal)
+
+    private fun mediaReady() = connectionState.value is ConnectionState.Ready
+
+    /** Send a text-reply device verb, then re-read state shortly so the UI reflects the result. */
+    private fun mediaVerb(command: String, after: () -> Unit) {
+        if (!mediaReady()) return
+        ble.sendCommand(command)
+        viewModelScope.launch { kotlinx.coroutines.delay(500); after() }
+    }
+
+    // Camera ---------------------------------------------------------------------------
+    fun refreshCameraStatus() { if (mediaReady()) ble.sendCaptured("cameraread", TAG_CAM_STATUS) }
+    fun openCamera() = mediaVerb("opencamera") { refreshCameraStatus() }
+    fun closeCamera() = mediaVerb("closecamera") { refreshCameraStatus() }
+
+    /** List saved photos on both stores (each reply updates only its own location's items). */
+    fun loadGallery() {
+        if (!mediaReady()) return
+        ble.sendCaptured("images json", TAG_IMAGES_LFS)
+        ble.sendCaptured("images json sd", TAG_IMAGES_SD)
+    }
+
+    /**
+     * Capture + save a still, then refresh the gallery so the new photo appears (tap it to view).
+     * `camerasave` replies plain text on the console (not JSON), so it can't go through the
+     * JSON-only capture channel — send it as a normal command and reload once it's had time to land.
+     */
+    fun capturePhoto() {
+        if (!mediaReady() || _mediaBusy.value) return
+        _mediaError.value = null
+        _mediaBusy.value = true
+        ble.sendCommand("camerasave")
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(1500) // capture + JPEG flash-write takes a beat
+            _mediaBusy.value = false
+            loadGallery()
+        }
+    }
+
+    private fun onImagesCapture(text: String, location: String) {
+        val listing = ImageListing.parse(text) ?: return
+        val folder = if (location == "SD") CAMERA_FOLDER_SD else CAMERA_FOLDER_LFS
+        val items = listing.images.map { (name, size) -> ImageItem(name, size, location, "$folder/$name") }
+        // Replace just this location's items; keep the other store's.
+        val others = (_gallery.value ?: emptyList()).filter { it.location != location }
+        _gallery.value = (others + items).sortedByDescending { it.filename }
+    }
+
+    fun viewImage(item: ImageItem) = startMediaRead(item.filename, listOf(item.path), MEDIA_READ_IMAGE)
+    fun deleteImage(item: ImageItem) = mediaVerb("imagedelete ${q(item.path)}") { loadGallery() }
+    fun clearViewedImage() { _viewedImage.value = null }
+
+    // Microphone -----------------------------------------------------------------------
+    fun refreshMicStatus() { if (mediaReady()) ble.sendCaptured("micread json", TAG_MIC_STATUS) }
+    fun pollMicLevel() { if (mediaReady()) ble.sendCaptured("miclevel json", TAG_MIC_LEVEL) }
+    fun openMic() = mediaVerb("openmic") { refreshMicStatus() }
+    fun closeMic() = mediaVerb("closemic") { refreshMicStatus() }
+    fun loadRecordings() { if (mediaReady()) ble.sendCaptured("miclist json", TAG_MIC_LIST) }
+    fun startRecording() = mediaVerb("micrecord start") { refreshMicStatus() }
+    fun stopRecording() = mediaVerb("micrecord stop") { refreshMicStatus(); loadRecordings() }
+    fun playRecording(item: RecordingItem) = startMediaRead(item.filename, item.candidates, MEDIA_READ_AUDIO)
+    fun deleteRecording(item: RecordingItem) = mediaVerb("micdelete ${q(item.filename)}") { loadRecordings() }
+    fun clearAudioClip() { _audioClip.value = null }
+    fun clearMediaError() { _mediaError.value = null }
+
+    // Windowed binary read (image/audio) ------------------------------------------------
+    private fun startMediaRead(name: String, candidates: List<String>, purpose: Int) {
+        if (!mediaReady() || _mediaBusy.value) return
+        mediaReadCandidates.clear()
+        mediaReadCandidates.addAll(candidates)
+        val first = mediaReadCandidates.removeFirstOrNull() ?: return
+        mediaReadName = name
+        mediaReadPurpose = purpose
+        mediaReadPath = first
+        mediaReadOffset = 0L
+        mediaReadBuf.reset()
+        _mediaError.value = null
+        _mediaBusy.value = true
+        requestMediaWindow()
+    }
+
+    private fun requestMediaWindow() {
+        ble.sendCaptured("fileread ${q(mediaReadPath)} $mediaReadOffset $MEDIA_READ_WINDOW bin", TAG_MEDIA_READ)
+    }
+
+    private fun onMediaReadCapture(text: String, timedOut: Boolean) {
+        if (mediaReadPurpose == MEDIA_READ_NONE) return
+        if (timedOut) { mediaReadTryNextOrFail("Transfer timed out — the file browser needs a Secure Channel + admin login."); return }
+        val r = FileReadChunk.parse(text) ?: run { mediaReadTryNextOrFail("Unexpected reply."); return }
+        if (!r.success) {
+            // A first-window failure means the file may be in the other candidate folder.
+            if (mediaReadOffset == 0L) mediaReadTryNextOrFail("Read failed: ${r.error}")
+            else mediaReadFail("Read failed: ${r.error}")
+            return
+        }
+        // Correlation guard: drop a late/cross-claimed window and re-request the one we need.
+        if (r.offset != mediaReadOffset || (r.path.isNotEmpty() && r.path != mediaReadPath)) {
+            requestMediaWindow(); return
+        }
+        val bytes = if (r.enc == "b64")
+            runCatching { android.util.Base64.decode(r.data, android.util.Base64.DEFAULT) }.getOrDefault(ByteArray(0))
+        else r.data.toByteArray(Charsets.UTF_8)
+        mediaReadBuf.write(bytes)
+        mediaReadOffset += r.len
+        if (r.eof || r.len == 0) {
+            val blob = MediaBlob(mediaReadName, mediaReadPath, mediaReadBuf.toByteArray())
+            val purpose = mediaReadPurpose
+            mediaReadPurpose = MEDIA_READ_NONE
+            _mediaBusy.value = false
+            if (purpose == MEDIA_READ_IMAGE) _viewedImage.value = blob else _audioClip.value = blob
+        } else {
+            requestMediaWindow()
+        }
+    }
+
+    /** Retry the next candidate path from offset 0, or give up with [msg]. */
+    private fun mediaReadTryNextOrFail(msg: String) {
+        val next = mediaReadCandidates.removeFirstOrNull()
+        if (next != null) {
+            mediaReadPath = next
+            mediaReadOffset = 0L
+            mediaReadBuf.reset()
+            requestMediaWindow()
+        } else {
+            mediaReadFail(msg)
+        }
+    }
+
+    private fun mediaReadFail(msg: String) {
+        mediaReadPurpose = MEDIA_READ_NONE
+        _mediaBusy.value = false
+        _mediaError.value = msg
     }
 
     // --- Maps page ----------------------------------------------------------------------
@@ -2761,6 +3456,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_CONTROL_MODULES = "controlmods"
         const val TAG_CONTROLS_PREFIX = "controls:"
         const val TAG_BATTERY = "battery"
+        const val TAG_MEMREPORT = "memreport"
+        const val TAG_FSUSAGE = "fsusage"
+        const val TAG_PERFTOP = "perftop"
+        const val TAG_TASKSTATS = "taskstats"
         const val TAG_LLM_STATUS = "llmstatus"
         const val TAG_LLM_MODELS = "llmmodels"
         const val TAG_LLM_GEN = "llmgen"
@@ -2770,6 +3469,19 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_FILE_STATS = "filestats"
         const val TAG_FILE_READ = "fileread"
         const val TAG_FILE_WRITE = "filewrite"
+        const val TAG_OTA_PREFIX = "ota:"
+        const val TAG_OTA_STATUS = "ota:status"
+        const val TAG_OTA_CREDENTIAL = "ota:credential"
+        const val TAG_OTA_STAGED = "ota:staged"
+        const val TAG_OTA_ARMED = "ota:armed"
+        const val TAG_OTA_MONITOR = "ota:monitor"
+        const val TAG_OTA_ACK = "ota:ack"
+        const val OTA_STATUS_TIMEOUT_MS = 15_000L
+        const val OTA_LONG_STATUS_TIMEOUT_MS = 60_000L
+        const val OTA_POLL_INTERVAL_MS = 3_000L
+        const val OTA_RECONNECT_INTERVAL_MS = 5_000L
+        const val OTA_RECONNECT_ATTEMPTS = 36
+        val OTA_STARTABLE_PHASES = setOf("idle", "succeeded", "failed", "canceled")
         const val TAG_EN_MODE = "enmode"
         const val TAG_EN_ENC = "enenc"
         const val TAG_EN_MESHROLE = "enmeshrole"
@@ -2790,6 +3502,21 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_MAP_READ = "mapread"
         const val TAG_MAP_DISCOVER = "mapdiscover"
         const val TAG_MAP_TRACKDIR = "maptrackdir"
+
+        // Camera + microphone media pages.
+        const val TAG_CAM_STATUS = "camstatus"
+        const val TAG_IMAGES_LFS = "imageslfs"
+        const val TAG_IMAGES_SD = "imagessd"
+        const val TAG_MIC_STATUS = "micstat"
+        const val TAG_MIC_LEVEL = "miclevel"
+        const val TAG_MIC_LIST = "miclist"
+        const val TAG_MEDIA_READ = "mediaread"
+        const val MEDIA_READ_WINDOW = 2048 // same 2 KB window the map/file loops use (fits the ~4 KB reply cap)
+        const val MEDIA_READ_NONE = 0
+        const val MEDIA_READ_IMAGE = 1
+        const val MEDIA_READ_AUDIO = 2
+        const val CAMERA_FOLDER_LFS = "/photos"    // default cameraCaptureFolder (LittleFS)
+        const val CAMERA_FOLDER_SD = "/sd/photos"  // default cameraCaptureFolder on SD
 
         // Windowed fileread for map/sidecar/track fetches. Must match the Files page's proven
         // 2048: the fileread REPLY is JSON with the window base64-encoded (4:3 expansion) plus a

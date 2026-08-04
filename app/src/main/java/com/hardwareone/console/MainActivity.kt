@@ -34,8 +34,10 @@ import com.hardwareone.console.ble.BleManager
 import com.hardwareone.console.ble.ConnectionState
 import com.hardwareone.console.security.SavedLog
 import com.hardwareone.console.ui.AppPage
+import com.hardwareone.console.ui.CameraScreen
 import com.hardwareone.console.ui.ConsoleScreen
 import com.hardwareone.console.ui.ConsoleViewModel
+import com.hardwareone.console.ui.DeviceSettingsScreen
 import com.hardwareone.console.ui.DevicesScreen
 import com.hardwareone.console.ui.EspNowConfigScreen
 import com.hardwareone.console.ui.EspNowDeviceScreen
@@ -47,10 +49,14 @@ import com.hardwareone.console.ui.HeaderNav
 import com.hardwareone.console.ui.LlmChatScreen
 import com.hardwareone.console.ui.LoginDialog
 import com.hardwareone.console.ui.MapsScreen
+import com.hardwareone.console.ui.MicScreen
+import com.hardwareone.console.ui.OtaScreen
 import com.hardwareone.console.ui.LogViewerScreen
 import com.hardwareone.console.ui.SavedLogsScreen
 import com.hardwareone.console.ui.SensorsScreen
 import com.hardwareone.console.ui.SettingsScreen
+import com.hardwareone.console.ui.PerfPage
+import com.hardwareone.console.ui.PerfScreen
 import com.hardwareone.console.ui.StatusScreen
 import com.hardwareone.console.ui.ThemePreference
 import com.hardwareone.console.ui.ThemeStore
@@ -81,10 +87,15 @@ class MainActivity : FragmentActivity() {
     /** Push stack of secondary screens above the current top page (empty = on a top page). */
     private sealed interface Screen {
         data object Settings : Screen
+        data object DeviceSettings : Screen
+        data object Camera : Screen
+        data object Mic : Screen
         data object Status : Screen
+        data object Perf : Screen
         data object Sensors : Screen
         data object LlmChat : Screen
         data object Files : Screen
+        data object Ota : Screen
         data object EspNow : Screen
         data object Automations : Screen
         data object Maps : Screen
@@ -158,7 +169,8 @@ class MainActivity : FragmentActivity() {
                 // leaves), so the normal screen timeout resumes right after.
                 val filesBusy by vm.filesBusy.collectAsState()
                 val mapDownload by vm.mapDownload.collectAsState()
-                val keepScreenAwake = filesBusy || (mapDownload?.finished == false)
+                val otaState by vm.ota.collectAsState()
+                val keepScreenAwake = filesBusy || (mapDownload?.finished == false) || otaState.keepScreenAwake
                 val localView = androidx.compose.ui.platform.LocalView.current
                 androidx.compose.runtime.DisposableEffect(keepScreenAwake) {
                     localView.keepScreenOn = keepScreenAwake
@@ -194,21 +206,31 @@ class MainActivity : FragmentActivity() {
                     loggedIn = loggedIn,
                     devicesLabel = when (current) {
                         Screen.Status -> "Status"
+                        Screen.Perf -> "Perf"
                         Screen.Sensors -> "Sensors"
                         Screen.LlmChat -> "LLM Chat"
                         Screen.Files -> "Files"
+                        Screen.Ota -> "OTA"
                         Screen.EspNow -> "ESP-NOW"
                         Screen.Automations -> "Automations"
                         Screen.Maps -> "Maps"
+                        Screen.DeviceSettings -> "Settings"
+                        Screen.Camera -> "Camera"
+                        Screen.Mic -> "Mic"
                         else -> "Devices"
                     },
                     onOpenDevices = onOpenDevices,
                     onOpenStatus = ({ openTool(Screen.Status) }).takeIf { current != Screen.Status },
+                    onOpenPerf = ({ openTool(Screen.Perf) }).takeIf { current != Screen.Perf },
                     onOpenSensors = ({ openTool(Screen.Sensors) }).takeIf { current != Screen.Sensors },
                     onOpenLlm = ({ openTool(Screen.LlmChat) }).takeIf { current != Screen.LlmChat },
                     onOpenFiles = ({ vm.loadFiles("/"); openTool(Screen.Files) }).takeIf { current != Screen.Files },
+                    onOpenOta = ({ vm.refreshOtaStatus(); openTool(Screen.Ota) }).takeIf { current != Screen.Ota },
                     onOpenEspNow = ({ openTool(Screen.EspNow) }).takeIf { current != Screen.EspNow },
                     onOpenAutomations = ({ vm.loadAutomations(); openTool(Screen.Automations) }).takeIf { current != Screen.Automations },
+                    onOpenDeviceSettings = ({ vm.loadControlModules(); openTool(Screen.DeviceSettings) }).takeIf { current != Screen.DeviceSettings },
+                    onOpenCamera = ({ openTool(Screen.Camera) }).takeIf { current != Screen.Camera },
+                    onOpenMic = ({ openTool(Screen.Mic) }).takeIf { current != Screen.Mic },
                     // No eager load here (unlike Files/Automations): the Screen.Maps branch's
                     // RESUMED loop loads on entry, and a double loadMaps() would run two
                     // concurrent `waypoint list` scrapes against the shared console stream.
@@ -281,6 +303,107 @@ class MainActivity : FragmentActivity() {
                         )
                     }
 
+                    Screen.DeviceSettings -> {
+                        val controlModules by vm.controlModules.collectAsState()
+                        val controls by vm.controls.collectAsState()
+                        val controlsLoading by vm.controlsLoading.collectAsState()
+                        // One-shot fetch of the module list on entry / app-resume; each module's
+                        // controls load lazily when its card is expanded (same as the Sensors page).
+                        LaunchedEffect(Unit) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) { vm.loadControlModules() }
+                        }
+                        DeviceSettingsScreen(
+                            modules = controlModules,
+                            controls = controls,
+                            controlsLoading = controlsLoading,
+                            onLoadControls = vm::loadControls,
+                            onSetControl = vm::setControl,
+                            onRefresh = vm::loadControlModules,
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.DeviceSettings),
+                        )
+                    }
+
+                    Screen.Camera -> {
+                        val camStatus by vm.cameraStatus.collectAsState()
+                        val gallery by vm.gallery.collectAsState()
+                        val viewedImage by vm.viewedImage.collectAsState()
+                        val controls by vm.controls.collectAsState()
+                        val controlsLoading by vm.controlsLoading.collectAsState()
+                        val mediaBusy by vm.mediaBusy.collectAsState()
+                        val mediaError by vm.mediaError.collectAsState()
+                        LaunchedEffect(Unit) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                vm.loadGallery()
+                                // Pause status polling while a JPEG pull owns the capture slot.
+                                while (true) {
+                                    if (!vm.mediaBusy.value) vm.refreshCameraStatus()
+                                    kotlinx.coroutines.delay(3_000)
+                                }
+                            }
+                        }
+                        CameraScreen(
+                            status = camStatus,
+                            gallery = gallery,
+                            viewedImage = viewedImage,
+                            controls = controls["camera"],
+                            controlsLoading = "camera" in controlsLoading,
+                            mediaBusy = mediaBusy,
+                            error = mediaError,
+                            onToggleCamera = { on -> if (on) vm.openCamera() else vm.closeCamera() },
+                            onCapture = vm::capturePhoto,
+                            onLoadControls = { vm.loadControls("camera") },
+                            onSetControl = { key, token -> vm.setControl("camera", key, token) },
+                            onViewImage = vm::viewImage,
+                            onDeleteImage = vm::deleteImage,
+                            onCloseImage = vm::clearViewedImage,
+                            onRefresh = { vm.refreshCameraStatus(); vm.loadGallery() },
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Camera),
+                        )
+                    }
+
+                    Screen.Mic -> {
+                        val micStatus by vm.micStatus.collectAsState()
+                        val micLevel by vm.micLevel.collectAsState()
+                        val recordings by vm.recordings.collectAsState()
+                        val audioClip by vm.audioClip.collectAsState()
+                        val controls by vm.controls.collectAsState()
+                        val controlsLoading by vm.controlsLoading.collectAsState()
+                        val mediaBusy by vm.mediaBusy.collectAsState()
+                        val mediaError by vm.mediaError.collectAsState()
+                        LaunchedEffect(Unit) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                vm.loadRecordings()
+                                // `micread json` carries the live level, so one poll drives both the
+                                // status card and the VU meter. Pause while a WAV pull owns the
+                                // capture slot (same rule the LLM screen uses during generation).
+                                while (true) {
+                                    if (!vm.mediaBusy.value) vm.refreshMicStatus()
+                                    kotlinx.coroutines.delay(600)
+                                }
+                            }
+                        }
+                        MicScreen(
+                            status = micStatus,
+                            level = micLevel,
+                            recordings = recordings,
+                            audioClip = audioClip,
+                            controls = controls["microphone"],
+                            controlsLoading = "microphone" in controlsLoading,
+                            mediaBusy = mediaBusy,
+                            error = mediaError,
+                            onToggleMic = { on -> if (on) vm.openMic() else vm.closeMic() },
+                            onStartRec = vm::startRecording,
+                            onStopRec = vm::stopRecording,
+                            onLoadControls = { vm.loadControls("microphone") },
+                            onSetControl = { key, token -> vm.setControl("microphone", key, token) },
+                            onPlay = vm::playRecording,
+                            onDelete = vm::deleteRecording,
+                            onClearClip = vm::clearAudioClip,
+                            onRefresh = { vm.refreshMicStatus(); vm.loadRecordings() },
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Mic),
+                        )
+                    }
+
                     Screen.Status -> {
                         val status by vm.deviceStatus.collectAsState()
                         val statusError by vm.statusError.collectAsState()
@@ -318,6 +441,45 @@ class MainActivity : FragmentActivity() {
                             traffic = bleTraffic,
                             onRefresh = vm::refreshStatus,
                             nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Status),
+                        )
+                    }
+
+                    Screen.Perf -> {
+                        val perfTop by vm.perfTop.collectAsState()
+                        val taskStats by vm.taskStats.collectAsState()
+                        val memReport by vm.memReport.collectAsState()
+                        val fsUsage by vm.fsUsage.collectAsState()
+                        var perfPage by remember { mutableStateOf(PerfPage.CPU) }
+                        // Poll only the visible page's command (keyed on perfPage so switching tabs
+                        // restarts the loop). The CPU page's `perftop json` samples ~0.75 s
+                        // on-device, so it polls slower than the cheap stack/memory pages.
+                        LaunchedEffect(perfPage) {
+                            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                                while (true) {
+                                    when (perfPage) {
+                                        PerfPage.CPU -> vm.refreshPerfCpu()
+                                        PerfPage.STACK -> vm.refreshPerfStack()
+                                        PerfPage.MEMORY -> vm.refreshMemory()
+                                    }
+                                    kotlinx.coroutines.delay(if (perfPage == PerfPage.CPU) 3_000 else 2_000)
+                                }
+                            }
+                        }
+                        PerfScreen(
+                            perfTop = perfTop,
+                            taskStats = taskStats,
+                            memReport = memReport,
+                            fsUsage = fsUsage,
+                            page = perfPage,
+                            onSelectPage = { perfPage = it },
+                            onRefresh = {
+                                when (perfPage) {
+                                    PerfPage.CPU -> vm.refreshPerfCpu()
+                                    PerfPage.STACK -> vm.refreshPerfStack()
+                                    PerfPage.MEMORY -> vm.refreshMemory()
+                                }
+                            },
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Perf),
                         )
                     }
 
@@ -396,6 +558,15 @@ class MainActivity : FragmentActivity() {
                         vm = vm,
                         nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Files),
                     )
+
+                    Screen.Ota -> {
+                        LaunchedEffect(Unit) { vm.refreshOtaStatus() }
+                        OtaScreen(
+                            vm = vm,
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Ota),
+                            onLogin = ::onLoginButtonClicked,
+                        )
+                    }
 
                     Screen.EspNow -> {
                         val enMode by vm.espNowMode.collectAsState()

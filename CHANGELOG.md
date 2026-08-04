@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com) and this project uses
 [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- **Closed-loop offline OTA over Bluetooth.** The Devices menu now includes an OTA page that imports
+  a local `.hw1ota` release bundle, validates its structure/signature/image identity on the phone,
+  stages the signed image and manifest through the encrypted BLE channel, asks HardwareOne's native
+  ESP-IDF recovery updater to verify and install it, reconnects after reboot, monitors the 60-second
+  health probation, and acknowledges the durable result.
+- **Recovery fallback credential setup.** A missing recovery WPA2/HTTP password can be sent once over
+  encrypted BLE; it is never written to app storage or command history.
+
+### Security
+- OTA adds no network or broad storage permission. The system document picker supplies the local
+  bundle, the app still has no `INTERNET` permission, and the device independently verifies its
+  embedded release trust root before selecting the image.
+
+## [2.6.3] — 2026-07-13
+
+A failed secure connection now explains itself on the Devices page.
+
+### Fixed
+- **Clear error when a device has no passphrase.** Connecting to a device that has no secure
+  passphrase set — while the app is configured to require one — no longer silently stops on the
+  Devices page. A "Secure connection failed" dialog now explains why and what to do (set a
+  passphrase on the device with `blesecret`, or clear it in the app to connect in plaintext). The
+  same dialog also covers a wrong passphrase and a handshake timeout; previously the reason
+  appeared only in the console.
+
 ## [2.6.2] — 2026-07-12
 
 Bigger Bluetooth uploads, and long transfers no longer die when the screen sleeps.
