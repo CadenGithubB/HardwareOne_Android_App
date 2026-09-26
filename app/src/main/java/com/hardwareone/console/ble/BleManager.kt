@@ -909,20 +909,6 @@ class BleManager(context: Context) {
 
     private sealed interface GattOp {
         class WriteRequest(val bytes: ByteArray) : GattOp
-        /**
-         * Write without an ATT response. Used only for OTA staging payloads.
-         *
-         * A write-with-response holds this serialised queue until the peer's ATT
-         * response arrives; if that response is lost the queue stalls for
-         * Android's ~30 s GATT timeout, which is longer than both the OTA
-         * checkpoint timeout and the device's upload idle timeout — one lost
-         * response therefore killed entire multi-megabyte transfers. Payload
-         * frames don't need per-write acknowledgement because `otawrite status`
-         * already returns the device's authoritative accepted offset and the
-         * uploader resyncs to it, so dropping the ack costs nothing and removes
-         * the stall. Control traffic still uses WriteRequest.
-         */
-        class WriteNoResponse(val bytes: ByteArray) : GattOp
         class ReadChar(val characteristic: BluetoothGattCharacteristic) : GattOp
     }
 
@@ -943,10 +929,6 @@ class BleManager(context: Context) {
             is GattOp.WriteRequest -> requestChar?.let {
                 addTx(op.bytes.size)
                 writeCharacteristicCompat(g, it, op.bytes)
-            } ?: false
-            is GattOp.WriteNoResponse -> requestChar?.let {
-                addTx(op.bytes.size)
-                writeCharacteristicCompat(g, it, op.bytes, noResponse = true)
             } ?: false
             is GattOp.ReadChar -> g.readCharacteristic(op.characteristic)
         }
@@ -1128,27 +1110,16 @@ class BleManager(context: Context) {
 
     // --- API-level compatibility shims ----------------------------------------------
 
-    private fun writeCharacteristicCompat(
-        g: BluetoothGatt,
-        char: BluetoothGattCharacteristic,
-        value: ByteArray,
-        noResponse: Boolean = false,
-    ): Boolean {
-        val type = if (noResponse) {
-            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        } else {
-            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        }
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            g.writeCharacteristic(char, value, type) == BluetoothGatt.GATT_SUCCESS
+    private fun writeCharacteristicCompat(g: BluetoothGatt, char: BluetoothGattCharacteristic, value: ByteArray): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            g.writeCharacteristic(char, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS
         } else {
             @Suppress("DEPRECATION") run {
-                char.writeType = type
+                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                 char.value = value
                 g.writeCharacteristic(char)
             }
         }
-    }
 
     private fun writeDescriptorCompat(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, value: ByteArray) {
         val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
