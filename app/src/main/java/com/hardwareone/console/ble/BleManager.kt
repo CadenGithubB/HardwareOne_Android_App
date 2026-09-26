@@ -81,6 +81,10 @@ class BleManager(context: Context) {
     private val _captures = MutableSharedFlow<Capture>(extraBufferCapacity = 8)
     val captures: SharedFlow<Capture> = _captures.asSharedFlow()
 
+    /** Unsolicited notification cards pushed by the device — see [DeviceNotification]. */
+    private val _notifications = MutableSharedFlow<DeviceNotification>(extraBufferCapacity = 32)
+    val notifications: SharedFlow<DeviceNotification> = _notifications.asSharedFlow()
+
     val isBluetoothSupported: Boolean get() = adapter != null
     val isBluetoothEnabled: Boolean get() = adapter?.isEnabled == true
 
@@ -277,6 +281,7 @@ class BleManager(context: Context) {
                 BluetoothGatt.STATE_CONNECTED -> {
                     emitInfo("Connected. Requesting high priority + discovering services…")
                     g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                    requestFastPhy(g)
                     _state.value = ConnectionState.DiscoveringServices(currentName)
                     g.discoverServices()
                 }
@@ -291,6 +296,48 @@ class BleManager(context: Context) {
                     }
                 }
             }
+        }
+
+        /**
+         * Ask for the Bluetooth 5 LE 2M PHY, which halves the air time per
+         * packet relative to the 1M PHY every BLE link starts on.
+         *
+         * Board-independent by construction rather than by a device table. The
+         * PHY update is *negotiated*: this is a preference, and a peer that
+         * cannot do 2M simply stays at 1M with no error and no reconnect. That
+         * matters because it IS chip-dependent on the device side -- ESP32-S3 /
+         * C3 / C6 / H2 are Bluetooth 5 and support it, while the classic ESP32
+         * is Bluetooth 4.2 and has no 2M PHY at all. The local check below is
+         * only to skip a pointless request on a phone that cannot do it either.
+         *
+         * Tempering expectations: with write-with-response (which OTA staging
+         * deliberately uses, see sendOtaChunk) throughput is bounded by one
+         * write per connection interval, not by air time, so this is headroom
+         * rather than a speed-up. It costs nothing to ask.
+         */
+        private fun requestFastPhy(g: BluetoothGatt) {
+            if (adapter?.isLe2MPhySupported != true) return
+            runCatching {
+                g.setPreferredPhy(
+                    BluetoothDevice.PHY_LE_2M_MASK,
+                    BluetoothDevice.PHY_LE_2M_MASK,
+                    BluetoothDevice.PHY_OPTION_NO_PREFERRED,
+                )
+            }
+        }
+
+        override fun onPhyUpdate(g: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) return
+            // Not an error path: a 4.2 peer such as the classic ESP32 stays on
+            // PHY_LE_1M and everything works exactly as before.
+            val name = { p: Int ->
+                when (p) {
+                    BluetoothDevice.PHY_LE_2M -> "2M"
+                    BluetoothDevice.PHY_LE_CODED -> "Coded"
+                    else -> "1M"
+                }
+            }
+            emitInfo("Radio PHY: tx ${name(txPhy)}, rx ${name(rxPhy)}.")
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
@@ -548,7 +595,7 @@ class BleManager(context: Context) {
         val ch = channel
         if (ch == null) {
             // Plaintext mode: one notification == one reply (may contain '\n').
-            val text = value.toString(Charsets.UTF_8)
+            val text = interceptNotifications(value.toString(Charsets.UTF_8)) ?: return
             if (captureConsume(text)) return
             updateAuthFromReply(text)
             _incoming.tryEmit(text)
@@ -615,10 +662,52 @@ class BleManager(context: Context) {
     }
 
     private fun emitSecureLine(line: String) {
-        val l = line.trimEnd('\r')
+        val l = interceptNotifications(line.trimEnd('\r')) ?: return
         if (captureConsume(l)) return
         updateAuthFromReply(l)
         _incoming.tryEmit(l)
+    }
+
+    // --- Unsolicited notification cards ----------------------------------------------
+
+    /**
+     * Divert `#NOTIF` cards out of the reply stream. Returns the text that remains for the
+     * console/capture, or null if the payload was nothing but cards.
+     *
+     * This MUST run before [captureConsume] and before [updateAuthFromReply]:
+     *
+     *  1. **Before the capture.** A capture only *starts* on a fragment beginning with '{',
+     *     so a card can never hijack a pending reply — but once a capture buffer is non-empty
+     *     it appends whatever arrives. Note the real exposure is *between* messages, not
+     *     within one: the device holds its tx mutex for a whole framed message and sends
+     *     cards non-blocking, so a card arriving mid-message is dropped rather than spliced
+     *     in. But a large reply is emitted as several separate sends and the capture buffer
+     *     spans all of them, so a card landing in that gap would corrupt the reply. Do not
+     *     "optimise away" this check on the reasoning that the device's mutex already covers
+     *     it — it does not.
+     *  2. **Before the auth sniffer.** [updateAuthFromReply] substring-matches
+     *     "Login successful" / "Logged out", and a card body carries device-supplied text
+     *     (peer names, SSIDs, file names). A card saying so must not flip our auth state.
+     *
+     * The classification itself lives in [DeviceNotification.split] so it can be unit-tested
+     * without a BLE stack; this method is only its side effects.
+     */
+    private fun interceptNotifications(text: String): String? {
+        val split = DeviceNotification.split(text)
+        // A `#NOTIF` line we couldn't parse stays in the remainder on purpose: it reaches the
+        // console as raw text, so a card the app can't read is visible in a saved log rather
+        // than vanishing into a counter nobody looks at.
+        if (split.cards.isEmpty()) return text
+        split.cards.forEach { _notifications.tryEmit(it) }
+
+        // A frame carrying only cards did not answer a command. Put back the watchdog that this
+        // frame's onAnyReply() just cleared; if the frame also carried reply text, that text
+        // *is* an answer and the clear stands.
+        if (split.remainder.isBlank()) {
+            restoreWatchdogAfterCard()
+            return null
+        }
+        return split.remainder
     }
 
     // --- Off-console capture (Status / Device pages) --------------------------------
@@ -656,15 +745,31 @@ class BleManager(context: Context) {
             if (captureTag != null) {
                 pendingCaptures.addLast(CaptureReq(command, tag, timeoutMs)); false
             } else {
+                // Claim the slot HERE, under the same lock as the check that
+                // decided it was free. Assigning captureTag after the block --
+                // even @Volatile -- is check-then-act, not mutual exclusion:
+                // two threads both read null, both start, and the second
+                // overwrites the first's tag. The first command's reply is then
+                // delivered under the second's tag and the first caller waits
+                // forever. Observed 2026-08-30: an `otastatus json` from the OTA
+                // screen re-entering composition started in the SAME millisecond
+                // as the transfer loop's `otawrite status`, and the write reply
+                // was handed to the status handler, stalling a 4 MB upload.
+                claimCaptureLocked(tag)
                 true
             }
         }
         if (startNow) startCapture(command, tag, timeoutMs)
     }
 
-    private fun startCapture(command: String, tag: String, timeoutMs: Long) {
-        synchronized(captureLock) { captureBuf.setLength(0) }
+    /** Arm [tag] as the active capture. MUST be called while holding [captureLock]. */
+    private fun claimCaptureLocked(tag: String) {
         captureTag = tag
+        captureBuf.setLength(0)
+    }
+
+    /** Sends a command whose slot the caller has ALREADY claimed via [claimCaptureLocked]. */
+    private fun startCapture(command: String, tag: String, timeoutMs: Long) {
         handler.removeCallbacks(captureTimeout)
         handler.postDelayed(captureTimeout, timeoutMs.coerceIn(CAPTURE_TIMEOUT_MS, MAX_CAPTURE_TIMEOUT_MS))
         android.util.Log.d("HW1CAP", "start tag=$tag cmd='${command.take(40)}'")
@@ -740,14 +845,18 @@ class BleManager(context: Context) {
         handler.removeCallbacks(captureQuietFlush)
         handler.removeCallbacks(captureTimeout)
         val tag = captureTag ?: return
-        captureTag = null
         val text = synchronized(captureLock) {
+            captureTag = null
             captureBuf.toString().also { captureBuf.setLength(0) }
         }.trim()
         android.util.Log.d("HW1CAP", "finish tag=$tag timedOut=$timedOut len=${text.length} '${text.take(50)}'")
         _captures.tryEmit(Capture(tag, text, timedOut = timedOut && text.isEmpty()))
-        // Kick off the next queued capture, if any.
-        val next = synchronized(captureLock) { pendingCaptures.removeFirstOrNull() }
+        // Kick off the next queued capture, if any. Popping and claiming must be
+        // ONE critical section: releasing above and claiming here in two steps
+        // reopens the same race against a concurrent sendCaptured.
+        val next = synchronized(captureLock) {
+            pendingCaptures.removeFirstOrNull()?.also { claimCaptureLocked(it.tag) }
+        }
         if (next != null) startCapture(next.command, next.tag, next.timeoutMs)
     }
 
@@ -755,8 +864,8 @@ class BleManager(context: Context) {
         handler.removeCallbacks(captureQuietFlush)
         handler.removeCallbacks(captureTimeout)
         val armed = captureTag
-        captureTag = null
         val queued = synchronized(captureLock) {
+            captureTag = null
             captureBuf.setLength(0)
             pendingCaptures.toList().also { pendingCaptures.clear() }
         }
@@ -800,6 +909,20 @@ class BleManager(context: Context) {
 
     private sealed interface GattOp {
         class WriteRequest(val bytes: ByteArray) : GattOp
+        /**
+         * Write without an ATT response. Used only for OTA staging payloads.
+         *
+         * A write-with-response holds this serialised queue until the peer's ATT
+         * response arrives; if that response is lost the queue stalls for
+         * Android's ~30 s GATT timeout, which is longer than both the OTA
+         * checkpoint timeout and the device's upload idle timeout — one lost
+         * response therefore killed entire multi-megabyte transfers. Payload
+         * frames don't need per-write acknowledgement because `otawrite status`
+         * already returns the device's authoritative accepted offset and the
+         * uploader resyncs to it, so dropping the ack costs nothing and removes
+         * the stall. Control traffic still uses WriteRequest.
+         */
+        class WriteNoResponse(val bytes: ByteArray) : GattOp
         class ReadChar(val characteristic: BluetoothGattCharacteristic) : GattOp
     }
 
@@ -821,6 +944,10 @@ class BleManager(context: Context) {
                 addTx(op.bytes.size)
                 writeCharacteristicCompat(g, it, op.bytes)
             } ?: false
+            is GattOp.WriteNoResponse -> requestChar?.let {
+                addTx(op.bytes.size)
+                writeCharacteristicCompat(g, it, op.bytes, noResponse = true)
+            } ?: false
             is GattOp.ReadChar -> g.readCharacteristic(op.characteristic)
         }
         if (!ok) {
@@ -837,6 +964,31 @@ class BleManager(context: Context) {
      * the REQUEST side). Mirrors the cap enforced in [sendCommand].
      */
     fun secureCommandCapacity(): Int = (negotiatedMtu - 28).coerceIn(40, 480)
+
+    /** Maximum raw OTA bytes that fit beside the OTA binary header in one
+     * encrypted GATT write at the negotiated MTU. */
+    fun otaChunkCapacity(): Int = (secureCommandCapacity() - OtaBleWire.HEADER_SIZE).coerceAtLeast(1)
+
+    /** Queue one byte-exact OTA payload frame. No command watchdog/reply is
+     * armed; the caller batches frames and follows them with `otawrite status`,
+     * whose explicit offset is the durable checkpoint. */
+    fun sendOtaChunk(offset: Long, payload: ByteArray): Boolean {
+        if (_state.value !is ConnectionState.Ready || !secureEstablished || !hasConnectPermission()) {
+            return false
+        }
+        if (payload.isEmpty() || payload.size > otaChunkCapacity()) return false
+        val ch = channel ?: return false
+        val plaintext = OtaBleWire.encodeChunk(offset, payload)
+        val frame = runCatching { ch.encrypt(plaintext) }.getOrNull() ?: return false
+        // Deliberately write-WITH-response. WriteNoResponse was tried and is
+        // strictly worse here: it wedged the GATT queue on the very first burst
+        // (0 bytes accepted, ~32 s stall) — and the secure channel drops any
+        // frame whose counter is not strictly increasing, so it cannot tolerate
+        // the reordering an unacknowledged write permits.
+        enqueue(GattOp.WriteRequest(frame))
+        noteActivity()
+        return true
+    }
 
     fun sendCommand(command: String) = sendCommand(command, watch = true)
 
@@ -884,19 +1036,50 @@ class BleManager(context: Context) {
     private var lastSentWasLogin = false
     private var silentStrikes = 0
     private var silenceAlerted = false
-    private val commandWatchdog = Runnable { onCommandSilence() }
+    private var watchdogArmed = false
+    private val commandWatchdog = Runnable { watchdogArmed = false; onCommandSilence() }
+
+    /** Watchdog state as it stood just before the current inbound frame cleared it, so a
+     *  frame that turns out to be nothing but notification cards can put it back. */
+    private data class WatchdogState(val armed: Boolean, val strikes: Int, val alerted: Boolean)
+    private var preFrameWatchdog = WatchdogState(false, 0, false)
 
     private fun armCommandWatchdog(command: String) {
         lastSentWasLogin = command.trimStart().startsWith("login ", ignoreCase = true)
+        watchdogArmed = true
         handler.removeCallbacks(commandWatchdog)
         handler.postDelayed(commandWatchdog, COMMAND_SILENCE_MS)
     }
 
     /** Any inbound notification proves the device is responding — clear the watchdog. */
     private fun onAnyReply() {
+        preFrameWatchdog = WatchdogState(watchdogArmed, silentStrikes, silenceAlerted)
         handler.removeCallbacks(commandWatchdog)
+        watchdogArmed = false
         silentStrikes = 0
         silenceAlerted = false
+    }
+
+    /**
+     * Undo [onAnyReply] for a frame that carried only notification cards.
+     *
+     * A card is unsolicited — it is not an answer to anything. But [onAnyReply] runs per
+     * inbound *frame*, and in secure mode that is before decryption, so a card cannot be
+     * excluded upstream. Without this, a device that accepts commands, stops replying, but
+     * keeps pushing cards would never trip the silent-device alert.
+     *
+     * The restored deadline is a full [COMMAND_SILENCE_MS] from now rather than the original
+     * one (the pending post is already cancelled by the time we get here), so a steady card
+     * stream can still stretch the alert out. That is a far smaller hole than cancelling it.
+     */
+    private fun restoreWatchdogAfterCard() {
+        val prev = preFrameWatchdog
+        silentStrikes = prev.strikes
+        silenceAlerted = prev.alerted
+        if (!prev.armed) return
+        watchdogArmed = true
+        handler.removeCallbacks(commandWatchdog)
+        handler.postDelayed(commandWatchdog, COMMAND_SILENCE_MS)
     }
 
     private fun onCommandSilence() {
@@ -945,16 +1128,27 @@ class BleManager(context: Context) {
 
     // --- API-level compatibility shims ----------------------------------------------
 
-    private fun writeCharacteristicCompat(g: BluetoothGatt, char: BluetoothGattCharacteristic, value: ByteArray): Boolean =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            g.writeCharacteristic(char, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS
+    private fun writeCharacteristicCompat(
+        g: BluetoothGatt,
+        char: BluetoothGattCharacteristic,
+        value: ByteArray,
+        noResponse: Boolean = false,
+    ): Boolean {
+        val type = if (noResponse) {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        } else {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        }
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            g.writeCharacteristic(char, value, type) == BluetoothGatt.GATT_SUCCESS
         } else {
             @Suppress("DEPRECATION") run {
-                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                char.writeType = type
                 char.value = value
                 g.writeCharacteristic(char)
             }
         }
+    }
 
     private fun writeDescriptorCompat(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, value: ByteArray) {
         val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -997,6 +1191,8 @@ class BleManager(context: Context) {
         handler.removeCallbacks(pskWaitTimeout)
         cancelCapture()
         handler.removeCallbacks(commandWatchdog)
+        watchdogArmed = false
+        preFrameWatchdog = WatchdogState(false, 0, false)
         silentStrikes = 0
         silenceAlerted = false
         handler.removeCallbacks(idleFlush)

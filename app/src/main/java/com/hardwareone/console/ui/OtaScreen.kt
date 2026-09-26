@@ -296,7 +296,12 @@ private fun otaStepLabel(step: OtaStep): String = when (step) {
 }
 
 private fun otaBytes(value: Long): String = when {
-    value >= 1024 * 1024 -> "%.1f MB".format(value / (1024.0 * 1024.0))
+    // Two decimals, not one. An OTA staging batch moves 16 * 468 = 7,488 B, so
+    // at "%.1f MB" (0.10 MB = 104,858 B steps) the number sat still for ~14
+    // batches -- about 20 seconds of an apparently frozen transfer. Two
+    // decimals step every 10,486 B, so it advances roughly every batch and a
+    // running transfer visibly reads as running.
+    value >= 1024 * 1024 -> "%.2f MB".format(value / (1024.0 * 1024.0))
     value >= 1024 -> "%.1f KB".format(value / 1024.0)
     else -> "$value B"
 }

@@ -47,6 +47,9 @@ internal fun ControlEntryRow(entry: ControlEntry, onSet: (token: String) -> Unit
         entry.readOnly -> ReadingRow(entry.label, entry.displayValue, 0.dp)
         entry.type == ControlEntry.Type.BOOL ->
             ControlToggle(entry.label, entry.boolValue ?: false) { on -> onSet(if (on) "on" else "off") }
+        // Options outrank min/max and type: an enum-valued int (microphoneBitDepth is 16 or 32,
+        // but reports min 16 / max 32) must be a select, not a number input offering the 15
+        // values in between that the device rejects.
         entry.options.isNotEmpty() ->
             ControlSelect(entry.label, entry.options, entry.displayValue, onSet)
         (entry.type == ControlEntry.Type.INT || entry.type == ControlEntry.Type.FLOAT) &&
@@ -108,9 +111,23 @@ private fun ControlToggle(label: String, checked: Boolean, onToggle: (Boolean) -
 }
 
 @Composable
-private fun ControlSelect(label: String, options: List<String>, current: String, onSelect: (String) -> Unit) {
+private fun ControlSelect(
+    label: String,
+    options: List<com.hardwareone.console.ble.ControlOption>,
+    current: String,
+    onSelect: (String) -> Unit,
+) {
     val hw = LocalHwColors.current
     var open by remember { mutableStateOf(false) }
+    val matched = options.firstOrNull { it.value == current }
+    // A stored value outside the published set (older config, or firmware/app version skew) is
+    // carried as an extra entry rather than dropped. Snapping the display to the first option
+    // would misreport the device, and would write a value the user never chose the moment they
+    // touched anything else.
+    val shown = if (matched != null || current.isBlank()) options else {
+        listOf(com.hardwareone.console.ble.ControlOption(current, "$current (current)")) + options
+    }
+    val currentLabel = matched?.label ?: current
     Row(
         Modifier.fillMaxWidth().padding(vertical = 2.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -119,15 +136,20 @@ private fun ControlSelect(label: String, options: List<String>, current: String,
         Text(label, color = hw.muted, style = MaterialTheme.typography.bodyMedium)
         Box {
             Text(
-                text = "$current ▾",
+                text = "$currentLabel ▾",
                 color = hw.onGradient,
                 style = MaterialTheme.typography.bodyMedium,
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.clickable { open = true },
             )
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                options.forEach { opt ->
-                    DropdownMenuItem(text = { Text(opt) }, onClick = { open = false; onSelect(opt) })
+                shown.forEach { opt ->
+                    DropdownMenuItem(
+                        text = { Text(opt.label) },
+                        // Send the VALUE, never the label — the device's set command takes the
+                        // left-hand side of the `value|label` pair.
+                        onClick = { open = false; onSelect(opt.value) },
+                    )
                 }
             }
         }

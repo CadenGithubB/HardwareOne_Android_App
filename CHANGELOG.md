@@ -7,11 +7,24 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **The app is now a device notification sink.** HardwareOne's notification system already fans an
+  event out to the OLED banner, the web toast and the G2 lens; the app joins as a fourth surface
+  (firmware sink `NSINK_APP`, master switch `notifydeviceapp`). Cards arrive unsolicited on the
+  existing command link as one `#NOTIF {json}` line, and appear as a banner over whatever page is
+  showing plus a list behind a new header bell. Per-kind muting (`notifyusermute`) and the personal
+  importance floor (`notifylevel`) are wired to the same device-side prefs the other surfaces use.
+- Notification cards are session-scoped: the device only sends them to a logged-in session and
+  filters them for that user, so the app drops its list on logout or disconnect. Every card is also
+  mirrored into the console log, since the device drops rather than queues cards when the link is
+  busy and the console is the durable record.
 - **Closed-loop offline OTA over Bluetooth.** The Devices menu now includes an OTA page that imports
   a local `.hw1ota` release bundle, validates its structure/signature/image identity on the phone,
-  stages the signed image and manifest through the encrypted BLE channel, asks HardwareOne's native
+  stages the signed image and manifest through a dedicated encrypted binary BLE protocol, asks HardwareOne's native
   ESP-IDF recovery updater to verify and install it, reconnects after reboot, monitors the 60-second
   health probation, and acknowledges the durable result.
+- **Checkpointed bulk transfer.** OTA sends three exact-offset binary frames per burst, then reads the
+  device's authoritative offset before continuing. Candidate and manifest each declare an exact size
+  and SHA-256 digest, and cancellation asks the device to delete the active partial.
 - **Recovery fallback credential setup.** A missing recovery WPA2/HTTP password can be sent once over
   encrypted BLE; it is never written to app storage or command history.
 
@@ -19,6 +32,8 @@ All notable changes to this project are documented here. The format follows
 - OTA adds no network or broad storage permission. The system document picker supplies the local
   bundle, the app still has no `INTERNET` permission, and the device independently verifies its
   embedded release trust root before selecting the image.
+- Every OTA control/data step requires the HardwareOne Secure Channel and a live superadmin session;
+  the protocol exposes no caller-selected device path.
 
 ## [2.6.3] — 2026-07-13
 

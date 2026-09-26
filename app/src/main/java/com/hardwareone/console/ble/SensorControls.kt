@@ -57,9 +57,7 @@ data class ControlsModule(
                 "string" -> ControlEntry.Type.STRING
                 else -> ControlEntry.Type.UNKNOWN
             }
-            val optionsStr = e.optString("options", "")
-            val options = if (optionsStr.isBlank()) emptyList()
-            else optionsStr.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+            val options = parseOptions(e.optString("options", ""))
             val v = e.opt("value")
             return ControlEntry(
                 key = e.optString("key"),
@@ -76,6 +74,42 @@ data class ControlsModule(
             )
         }
 
+        /**
+         * Parse the device's `options` hint into selectable choices.
+         *
+         * The device's format is `value|label` pairs — `"0|Preserve,1|Off,2|On"` — where the
+         * VALUE is what a `set` command takes and the label is display text only. Splitting on
+         * `,` alone (as this used to) produced entries like `0|Preserve` that were both shown
+         * raw and sent back verbatim, so every one of the ~41 settings using this format had a
+         * dropdown that displayed nonsense and set nothing.
+         *
+         * Each comma-separated token splits on its FIRST `|`, or failing that its FIRST `:` —
+         * decided per token, not per string, so a mixed list still parses. The colon form is
+         * legacy but very much alive: the whole camera module still uses it (`cameraFramesize`,
+         * `cameraWBMode`, `cameraSpecialEffect`, `cameraStorageLocation`, `g2StreamToneMap`), so
+         * dropping it would break those dropdowns. Taking the FIRST separator is what lets a label
+         * like `Mode: fast` survive intact. A token with no separator is its own value and label.
+         */
+        private fun parseOptions(raw: String): List<ControlOption> {
+            if (raw.isBlank()) return emptyList()
+            // "bitmask:1|Thermal,2|ToF" is a checkbox grid over an int mask, NOT a select. Its
+            // value is the mask, so offering it as a dropdown would set a single bit and wipe the
+            // rest. Fall through to the numeric renderer instead.
+            if (raw.trimStart().startsWith("bitmask:", ignoreCase = true)) return emptyList()
+            return raw.split(',').mapNotNull { part ->
+                val item = part.trim()
+                if (item.isEmpty()) return@mapNotNull null
+                val at = item.indexOf('|').takeIf { it >= 0 } ?: item.indexOf(':')
+                if (at <= 0) {
+                    ControlOption(item, item)
+                } else {
+                    val value = item.substring(0, at).trim()
+                    val label = item.substring(at + 1).trim()
+                    ControlOption(value, label.ifEmpty { value })
+                }
+            }
+        }
+
         private fun displayOf(v: Any?): String = when (v) {
             null, JSONObject.NULL -> "—"
             is Boolean -> if (v) "on" else "off"
@@ -85,14 +119,20 @@ data class ControlsModule(
     }
 }
 
+/**
+ * One choice in a select-type control. [value] is what the device's set command expects; [label]
+ * is display text only. They differ for every `value|label` option the firmware publishes.
+ */
+data class ControlOption(val value: String, val label: String)
+
 data class ControlEntry(
     val key: String,
     val label: String,
     val type: Type,
     val min: Double?,
     val max: Double?,
-    /** Enum choices (from a comma-separated `options`); empty when not an enum. */
-    val options: List<String>,
+    /** Enum choices from the device's `options` hint; empty when this isn't a select. */
+    val options: List<ControlOption>,
     /** Current value for int/float controls. */
     val numberValue: Double?,
     /** Current value for bool controls. */

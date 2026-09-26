@@ -14,6 +14,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -80,6 +81,7 @@ class HeaderNav(
     val onOpenStatus: (() -> Unit)? = null,
     val onOpenPerf: (() -> Unit)? = null,
     val onOpenSensors: (() -> Unit)? = null,
+    val onOpenHealth: (() -> Unit)? = null,
     val onOpenLlm: (() -> Unit)? = null,
     val onOpenFiles: (() -> Unit)? = null,
     val onOpenOta: (() -> Unit)? = null,
@@ -92,6 +94,17 @@ class HeaderNav(
     val onSyncClock: (() -> Unit)? = null,
     val onSaveLog: (() -> Unit)? = null,
     val onClearLog: (() -> Unit)? = null,
+    // Device notification cards. The bell sits next to the gear on every page (the device
+    // considers these interrupt-worthy, so they must be reachable from anywhere); null hides it.
+    val unreadNotifications: Int = 0,
+    val onOpenNotifications: (() -> Unit)? = null,
+    /**
+     * Tools this device's firmware build doesn't contain, as `menu label -> reason`. Keyed by the
+     * label text used in the dropdown below. Listed entries render greyed with the reason under
+     * them instead of disappearing: on hardware you flash yourself, knowing a page is absent
+     * *because the build dropped it* beats a menu that quietly changes shape.
+     */
+    val unavailableTools: Map<String, String> = emptyMap(),
 )
 
 /**
@@ -122,6 +135,7 @@ fun AppHeader(
                 Icon(painterResource(R.drawable.ic_refresh), contentDescription = "Refresh", tint = hw.onGradient)
             }
         }
+        nav.onOpenNotifications?.let { NotificationBell(nav.unreadNotifications, it) }
         GearButton(nav.onOpenSettings)
     }
 }
@@ -138,7 +152,7 @@ fun AppHeader(
 // in sync with MainActivity's `devicesLabel` mapping — plus "Console"). BOTH segments reserve the
 // widest of these, so the switcher is a fixed size, never resizes as you move between pages, and
 // the two segments are always the same width as each other.
-private val SWITCHER_LABELS = listOf("Devices", "Status", "Perf", "Sensors", "LLM Chat", "Files", "OTA", "ESP-NOW", "Maps", "Camera", "Mic", "Settings", "Console")
+private val SWITCHER_LABELS = listOf("Devices", "Status", "Perf", "Sensors", "R1 Health", "LLM Chat", "Files", "OTA", "ESP-NOW", "Maps", "Camera", "Mic", "Settings", "Console")
 
 @Composable
 fun PageToggle(nav: HeaderNav) {
@@ -159,20 +173,25 @@ fun PageToggle(nav: HeaderNav) {
                     devMenu = true
                 }
                 DropdownMenu(expanded = devMenu, onDismissRequest = { devMenu = false }) {
-                    nav.onOpenDevices?.let { go -> DropdownMenuItem(text = { Text("Devices") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenStatus?.let { go -> DropdownMenuItem(text = { Text("Status") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenPerf?.let { go -> DropdownMenuItem(text = { Text("Perf") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenSensors?.let { go -> DropdownMenuItem(text = { Text("Sensors") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenLlm?.let { go -> DropdownMenuItem(text = { Text("LLM Chat") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenFiles?.let { go -> DropdownMenuItem(text = { Text("Files") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenOta?.let { go -> DropdownMenuItem(text = { Text("OTA update") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenEspNow?.let { go -> DropdownMenuItem(text = { Text("ESP-NOW") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenAutomations?.let { go -> DropdownMenuItem(text = { Text("Automations") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenMaps?.let { go -> DropdownMenuItem(text = { Text("Maps") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenCamera?.let { go -> DropdownMenuItem(text = { Text("Camera") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenMic?.let { go -> DropdownMenuItem(text = { Text("Microphone") }, onClick = { devMenu = false; go() }) }
-                    nav.onOpenDeviceSettings?.let { go -> DropdownMenuItem(text = { Text("Device settings") }, onClick = { devMenu = false; go() }) }
-                    nav.onSyncClock?.let { go -> DropdownMenuItem(text = { Text("Sync clock") }, onClick = { devMenu = false; go() }) }
+                    @Composable
+                    fun tool(label: String, go: (() -> Unit)?) =
+                        ToolMenuItem(nav, label, go) { devMenu = false }
+
+                    tool("Devices", nav.onOpenDevices)
+                    tool("Status", nav.onOpenStatus)
+                    tool("Perf", nav.onOpenPerf)
+                    tool("Sensors", nav.onOpenSensors)
+                    tool("R1 Health", nav.onOpenHealth)
+                    tool("LLM Chat", nav.onOpenLlm)
+                    tool("Files", nav.onOpenFiles)
+                    tool("OTA update", nav.onOpenOta)
+                    tool("ESP-NOW", nav.onOpenEspNow)
+                    tool("Automations", nav.onOpenAutomations)
+                    tool("Maps", nav.onOpenMaps)
+                    tool("Camera", nav.onOpenCamera)
+                    tool("Microphone", nav.onOpenMic)
+                    tool("Device settings", nav.onOpenDeviceSettings)
+                    tool("Sync clock", nav.onSyncClock)
                 }
             } else {
                 // Not logged in → no device tools to branch to; just jump to the Devices page.
@@ -191,6 +210,29 @@ fun PageToggle(nav: HeaderNav) {
             }
         }
     }
+}
+
+/**
+ * One device-tool entry. Renders greyed with its reason when this firmware build lacks the
+ * feature, normally otherwise, and not at all when [go] is null (the page you're already on).
+ */
+@Composable
+private fun ToolMenuItem(nav: HeaderNav, label: String, go: (() -> Unit)?, onDismiss: () -> Unit) {
+    val reason = nav.unavailableTools[label]
+    if (reason != null) {
+        DropdownMenuItem(
+            text = {
+                Column {
+                    Text(label)
+                    Text(reason, style = MaterialTheme.typography.labelSmall)
+                }
+            },
+            onClick = {},
+            enabled = false,
+        )
+        return
+    }
+    go?.let { DropdownMenuItem(text = { Text(label) }, onClick = { onDismiss(); it() }) }
 }
 
 @Composable

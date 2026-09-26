@@ -88,8 +88,19 @@ fun CameraScreen(
 
                     when {
                         status == null -> MediaBanner("Reading camera… (needs a connected, logged-in device)")
-                        !status.connected -> MediaBanner("No camera detected on this device.")
+                        // The only true absence claim: this build has no camera at all.
+                        !status.supported -> MediaBanner("No camera on this device — the firmware was built without camera support.")
                         else -> {
+                            // Three distinct states, and only `supported`/`detected` may be read
+                            // as presence. `connected` is the runtime init flag (cameraConnected)
+                            // and turns true only after a start — gating the card on it hid the
+                            // very switch that starts the camera, which is what made this
+                            // unrecoverable. The switch stays reachable in every state below.
+                            if (!status.detected) {
+                                MediaBanner("Camera not probed yet — it identifies itself on first start. Start it below.")
+                            } else if (!status.connected) {
+                                MediaBanner("Camera is stopped. Start it below — it doesn't auto-start unless enabled in device setup.")
+                            }
                             StatusCard(status, onToggleCamera, onCapture, mediaBusy)
                             if (status.enabled) {
                                 TuningPanel(controls, controlsLoading, onLoadControls, onSetControl)

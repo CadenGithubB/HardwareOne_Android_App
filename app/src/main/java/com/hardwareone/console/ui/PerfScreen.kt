@@ -54,6 +54,7 @@ private val Amber = Color(0xFFE0A800) // mid-band warning (matches BatteryGlyph)
 fun PerfScreen(
     perfTop: PerfTop?,
     taskStats: TaskStats?,
+    taskStatsError: String?,
     memReport: MemReport?,
     fsUsage: FsUsage?,
     page: PerfPage,
@@ -64,7 +65,8 @@ fun PerfScreen(
     val hw = LocalHwColors.current
     val loading = when (page) {
         PerfPage.CPU -> perfTop == null
-        PerfPage.STACK -> taskStats == null
+        // A failed fetch is not still loading — without this the header spinner runs forever.
+        PerfPage.STACK -> taskStats == null && taskStatsError == null
         PerfPage.MEMORY -> memReport == null && fsUsage == null
     }
     Box(
@@ -88,7 +90,7 @@ fun PerfScreen(
                     ) {
                         when (page) {
                             PerfPage.CPU -> CpuPage(perfTop)
-                            PerfPage.STACK -> StackPage(taskStats)
+                            PerfPage.STACK -> StackPage(taskStats, taskStatsError)
                             PerfPage.MEMORY -> MemoryPage(memReport, fsUsage)
                         }
                         Spacer(Modifier.height(8.dp))
@@ -211,22 +213,57 @@ private fun CpuRow(name: String, pct: Int, idle: Boolean) {
 // ---------------------------------------------------------------------------------------------
 // Stack page — per-task min-free, riskiest first (mirrors the OLED Perf Stack page)
 // ---------------------------------------------------------------------------------------------
-@Composable
-private fun StackPage(stats: TaskStats?) {
-    val hw = LocalHwColors.current
-    if (stats == null) { PerfLoading("Reading task stacks…"); return }
-    val tasks = stats.tasks.sortedBy { it.stackFree } // lowest min-free first = riskiest
-    // Bar length is min-free relative to the roomiest task; the absolute byte value is on the
-    // right. So a short red bar = little headroom left, a long green bar = plenty.
-    val maxFree = (tasks.maxOfOrNull { it.stackFree } ?: 1).coerceAtLeast(1)
+/**
+ * Bytes of headroom below which a task is treated as fully "at risk" — the reference the
+ * fallback bar fills against. A task with this much free reads as empty; 0 free reads as full.
+ */
+private const val STACK_DANGER_FLOOR = 2048f
 
-    SectionCard("Stack min-free · ${stats.total} tasks") {
+@Composable
+private fun StackPage(stats: TaskStats?, error: String?) {
+    val hw = LocalHwColors.current
+    if (stats == null) {
+        // Say what went wrong instead of spinning. The likeliest cause is a reply too big for the
+        // device's command buffer, which is silent on the wire — see onTaskStatsCapture.
+        if (error != null) {
+            SectionCard("Stack") {
+                Text(error, color = hw.danger, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "Tap refresh to try again.",
+                    color = hw.muted,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        } else {
+            PerfLoading("Reading task stacks…")
+        }
+        return
+    }
+    // Lowest headroom first = closest to overflowing, whichever figure we can show.
+    val tasks = stats.tasks.sortedBy { it.stackFree }
+    // The device reports peak consumption only if it also sends each stack's total size; ESP-IDF's
+    // task API exposes only the high-water mark, so without that field "used" is unknowable and we
+    // fall back to headroom. See TaskInfo.
+    val showUsed = tasks.any { it.stackUsed != null }
+
+    val title = if (showUsed) "Stack used · ${stats.total} tasks" else "Stack headroom · ${stats.total} tasks"
+    SectionCard(title) {
+        Text(
+            text = if (showUsed) {
+                "Peak bytes each task has consumed, of its total stack. Fuller bar = less room left."
+            } else {
+                "Lowest free bytes each task has ever had. Fuller bar = closer to overflow."
+            },
+            color = hw.muted,
+            style = MaterialTheme.typography.labelSmall,
+        )
         if (tasks.isEmpty()) {
             Text("No task data.", color = hw.muted, style = MaterialTheme.typography.bodyMedium)
         } else tasks.forEach { t ->
             val risky = t.stackFree < 512
             val warn = t.stackFree < 1024
             val color = when { risky -> hw.danger; warn -> Amber; else -> hw.success }
+            val used = t.stackUsed
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(
@@ -240,13 +277,25 @@ private fun StackPage(stats: TaskStats?) {
                     )
                     Spacer(Modifier.size(8.dp))
                     Text(
-                        text = "${t.stackFree} B",
+                        // Spell out which direction the number runs; a bare byte count next to a
+                        // bar was the ambiguity here.
+                        text = if (used != null) "$used / ${t.stackSize} B" else "${t.stackFree} B free",
                         color = hw.muted,
                         style = MaterialTheme.typography.bodyMedium,
                         fontFamily = FontFamily.Monospace,
                     )
                 }
-                MeterBar(fraction = t.stackFree.toFloat() / maxFree, color = color)
+                // Both bars fill as the situation worsens, matching the CPU page's usage bars. The
+                // old bar did the opposite — longest for the roomiest task — so a healthy task drew
+                // the biggest bar on a page you read to find trouble.
+                MeterBar(
+                    fraction = if (used != null && t.stackSize > 0) {
+                        used.toFloat() / t.stackSize
+                    } else {
+                        1f - (t.stackFree.toFloat() / STACK_DANGER_FLOOR).coerceIn(0f, 1f)
+                    },
+                    color = color,
+                )
             }
         }
     }

@@ -116,8 +116,15 @@ fun MicScreen(
 
                     when {
                         status == null -> MediaBanner("Reading microphone… (needs a connected, logged-in device)")
-                        !status.connected -> MediaBanner("No microphone detected on this device.")
+                        // The mic has NO detection layer: PDM over I2S is unprobeable, so the
+                        // device can only report what was compiled in. This is therefore a
+                        // statement about the build, never about whether hardware is present.
+                        status.noSourceCompiledIn ->
+                            MediaBanner("No microphone in this build — the firmware was built without onboard mic support, and no G2 glasses are connected.")
                         else -> {
+                            if (!status.connected) {
+                                MediaBanner("Microphone is stopped. Start it below — it doesn't auto-start unless enabled in device setup.")
+                            }
                             StatusCard(status, level, onToggleMic, onStartRec, onStopRec)
                             if (status.enabled) {
                                 TuningPanel(controls, controlsLoading, onLoadControls, onSetControl)

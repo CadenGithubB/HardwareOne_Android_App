@@ -118,8 +118,29 @@ data class PerfTop(
     }
 }
 
-/** One task's stack min-free. `stackFree` is BYTES (already correct under ESP-IDF — never *4). */
-data class TaskInfo(val name: String, val state: String, val prio: Int, val stackFree: Int)
+/**
+ * One task's stack figures. All values are BYTES (already correct under ESP-IDF — never *4).
+ *
+ * [stackFree] is FreeRTOS's `usStackHighWaterMark`: the LOWEST free space the task has had since
+ * it started. It is the only stack figure ESP32 firmware can report from `uxTaskGetSystemState` —
+ * `TaskStatus_t` carries `pxStackBase` but not the stack's end, because `pxEndOfStack` is compiled
+ * out on downward-growing stacks. So peak *consumption* is unknowable unless the device separately
+ * reports how big each stack was allocated.
+ *
+ * [stackSize] is that total, and is 0 when the device doesn't send it — model the union, render
+ * the intersection. Once firmware adds a `stackSize` field to `taskstats json`, [stackUsed]
+ * starts returning real numbers and the Perf page switches to consumption with no app change.
+ */
+data class TaskInfo(
+    val name: String,
+    val state: String,
+    val prio: Int,
+    val stackFree: Int,
+    val stackSize: Int = 0,
+) {
+    /** Peak bytes consumed, or null when the device didn't report the stack's total size. */
+    val stackUsed: Int? get() = if (stackSize > stackFree) stackSize - stackFree else null
+}
 
 /** `taskstats json` — the OLED Perf "Stack" page mirror: per-task state/prio/stack min-free. */
 data class TaskStats(val total: Int, val tasks: List<TaskInfo>) {
@@ -130,7 +151,13 @@ data class TaskStats(val total: Int, val tasks: List<TaskInfo>) {
             val tasks = buildList {
                 for (i in 0 until arr.length()) {
                     val t = arr.optJSONObject(i) ?: continue
-                    add(TaskInfo(t.optString("name"), t.optString("state"), t.optInt("prio"), t.optInt("stackFree")))
+                    add(TaskInfo(
+                        name = t.optString("name"),
+                        state = t.optString("state"),
+                        prio = t.optInt("prio"),
+                        stackFree = t.optInt("stackFree"),
+                        stackSize = t.optInt("stackSize", 0),
+                    ))
                 }
             }
             return TaskStats(o.optInt("total", tasks.size), tasks)

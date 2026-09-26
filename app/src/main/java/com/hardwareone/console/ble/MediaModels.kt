@@ -11,9 +11,19 @@ import org.json.JSONObject
 
 /** `cameraread` → camera status (always JSON). */
 data class CameraStatus(
+    /** Camera compiled in for this board — a build fact, false only on a camera-less build. */
+    val supported: Boolean,
+    /**
+     * The SCCB probe has seen a sensor chip at least once since boot. Sticky: it survives the
+     * camera being stopped, which is what lets "absent" be told apart from "never started".
+     */
+    val detected: Boolean,
+    /** Driver started. */
     val enabled: Boolean,
+    /** Driver initialised. RUNTIME state, not presence — see [detected]. */
     val connected: Boolean,
     val streaming: Boolean,
+    /** Chip the probe identified (OV2640/OV3660/OV5640), or a placeholder before first start. */
     val model: String,
     val width: Int,
     val height: Int,
@@ -24,9 +34,13 @@ data class CameraStatus(
     companion object {
         fun parse(json: String): CameraStatus? {
             val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
-            // A compiled-out camera replies "{}" — treat a payload with no camera keys as absent.
-            if (!o.has("enabled") && !o.has("connected")) return null
+            if (!o.has("enabled") && !o.has("connected") && !o.has("supported")) return null
             return CameraStatus(
+                // Default true on both: firmware predating these keys still has a camera, and an
+                // app that declared "absent" over a missing field would repeat the exact bug
+                // these fields were added to fix.
+                supported = o.optBoolean("supported", true),
+                detected = o.optBoolean("detected", true),
                 enabled = o.optBoolean("enabled"),
                 connected = o.optBoolean("connected"),
                 streaming = o.optBoolean("streaming"),
@@ -41,14 +55,35 @@ data class CameraStatus(
 
 /** `micread json` → microphone status. */
 data class MicStatus(
+    /** Driver started (`gMicRunning`). */
     val enabled: Boolean,
+    /**
+     * Driver initialised (`micConnected`). This is RUNTIME state, not hardware presence — it only
+     * goes true once the mic has been started, so it must never be read as "is there a mic".
+     * Use [hardwarePresent] for that.
+     */
     val connected: Boolean,
     val recording: Boolean,
     val sampleRate: Int,
     val bitDepth: Int,
     val channels: Int,
     val level: Int,
+    /**
+     * NOT a hardware probe. PDM over I2S has no ID register, so the device reports a compile-time
+     * constant here — true iff `ENABLE_MICROPHONE_SENSOR` (HAL_Audio.cpp). False means "this build
+     * has no onboard mic", never "the mic is missing".
+     */
+    val pdmCompiledIn: Boolean,
+    /** G2 glasses mic reachable — a BLE link check on the glasses, not local hardware. */
+    val g2LinkUp: Boolean,
 ) {
+    /**
+     * True when this build has no mic source at all. The mic has NO detection layer — the honest
+     * model is build flag plus runtime state — so this is the only absence claim the app can
+     * make, and it is a statement about the firmware, not the hardware.
+     */
+    val noSourceCompiledIn: Boolean get() = !pdmCompiledIn && !g2LinkUp && !connected
+
     companion object {
         fun parse(json: String): MicStatus? {
             val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
@@ -61,6 +96,10 @@ data class MicStatus(
                 bitDepth = o.optInt("bitDepth"),
                 channels = o.optInt("channels"),
                 level = o.optInt("level"),
+                // Absent on firmware that predates these keys — assume present rather than
+                // declaring "no microphone" on the strength of a missing field.
+                pdmCompiledIn = o.optBoolean("pdmAvailable", true),
+                g2LinkUp = o.optBoolean("g2Available", false),
             )
         }
 

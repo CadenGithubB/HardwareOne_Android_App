@@ -15,6 +15,62 @@ import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 
+/** Wire contract for app -> device encrypted BLE OTA payload frames.
+ *
+ * The outer HardwareOne Secure Channel provides AEAD, replay protection, and
+ * ordering. This inner header makes the plaintext unambiguously binary and
+ * carries an explicit device-file offset so checkpoint replies can recover
+ * cleanly from a dropped/deferred frame.
+ */
+object OtaBleWire {
+    private val PREFIX = byteArrayOf(0x00, 'H'.code.toByte(), 'W'.code.toByte(), '1'.code.toByte(),
+        'O'.code.toByte(), 'T'.code.toByte(), 'A'.code.toByte(), 0x01)
+    const val HEADER_SIZE = 12
+
+    fun encodeChunk(offset: Long, payload: ByteArray): ByteArray {
+        require(offset in 0..0xffff_ffffL) { "OTA offset does not fit uint32" }
+        require(payload.isNotEmpty()) { "OTA chunk is empty" }
+        return ByteArray(HEADER_SIZE + payload.size).also { out ->
+            PREFIX.copyInto(out)
+            out[8] = (offset ushr 24).toByte()
+            out[9] = (offset ushr 16).toByte()
+            out[10] = (offset ushr 8).toByte()
+            out[11] = offset.toByte()
+            payload.copyInto(out, HEADER_SIZE)
+        }
+    }
+}
+
+/** `otawrite begin|status|finish|abort` checkpoint response. */
+data class OtaWriteStatus(
+    val success: Boolean,
+    val active: Boolean,
+    val member: String,
+    val size: Long,
+    val expected: Long,
+    val final: Boolean,
+    val chunkMax: Int,
+    val error: String?,
+) {
+    companion object {
+        fun parse(json: String): OtaWriteStatus? {
+            val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
+            if (!o.has("success")) return null
+            val success = o.optBoolean("success", false)
+            return OtaWriteStatus(
+                success = success,
+                active = o.optBoolean("active", false),
+                member = o.optString("member"),
+                size = o.optLong("size"),
+                expected = o.optLong("expected"),
+                final = o.optBoolean("final", false),
+                chunkMax = o.optInt("chunkMax"),
+                error = if (success) null else o.optString("error").ifEmpty { "OTA upload failed" },
+            )
+        }
+    }
+}
+
 /** The exact files emitted by `tools/ota/make_bundle.py`. */
 data class OtaBundle(
     val firmware: ByteArray,
@@ -32,6 +88,12 @@ data class OtaBundle(
     companion object {
         const val FORMAT = "hardwareone-ota-bundle"
         const val FORMAT_VERSION = 1
+        // Absolute parser guard only -- it bounds a ZIP member before identity
+        // is known. It is NOT a "does this fit ota_0" check: 0x5A0000 is the
+        // literal the firmware itself deleted on 2026-08-16 for being wrong in
+        // both directions (too small for the 16 MB generic layout, too large
+        // for the headless and 8 MB ones). The real per-layout capacity comes
+        // from the device as otastatus.slotSize; see requireFitsDevice below.
         const val MAX_IMAGE_BYTES = 0x5A0000
         const val MAX_BUNDLE_BYTES = MAX_IMAGE_BYTES + 16 * 1024
         private const val MAX_MANIFEST_BYTES = 2048
@@ -136,17 +198,17 @@ data class OtaBundle(
             require(fields.imageSha256.contentEquals(digest)) { "Firmware SHA-256 does not match manifest." }
             validateAppDescriptor(firmware, fields.project, fields.version)
             require(fields.project == "hardwareone-idf") { "Package is not HardwareOne firmware." }
-            val suffix = when (fields.board) {
-                "feathers3" -> "+f3o1"
-                "feathers3_fe" -> "+f3feo1"
-                else -> throw IllegalArgumentException("Unsupported OTA board: ${fields.board}")
-            }
-            val expectedLayout = when (fields.board) {
-                "feathers3" -> "hw1-f3-ota-v1"
-                else -> "hw1-f3fe-ota-v1"
-            }
-            require(fields.layout == expectedLayout) { "OTA board/layout pairing is invalid." }
-            require(fields.version.endsWith(suffix)) { "Firmware version does not belong to ${fields.board}." }
+            // Which (board, layout) identities exist is the firmware's contract,
+            // not this app's. This was a hardcoded board -> layout/suffix table,
+            // so every new deployment layered onto an existing board -- e.g.
+            // headless/feathers3, which is feathers3 + hw1-hl-f3-ota-v1 -- was
+            // rejected here as an "invalid pairing" before the device-aware
+            // check in importOtaBundle could compare the package against what
+            // the connected device actually reports. Parsing only proves the
+            // package is internally coherent; identity is settled against
+            // otastatus, and authoritatively by the device itself on staging.
+            require(fields.board.isNotBlank()) { "Package does not name a board." }
+            require(fields.layout.isNotBlank()) { "Package does not name an OTA layout." }
             require(fields.dataSchema == 1L) { "Unsupported firmware data schema ${fields.dataSchema}." }
 
             return OtaBundle(
@@ -278,6 +340,10 @@ data class OtaDeviceStatus(
     val available: Boolean,
     val board: String,
     val layout: String,
+    /** ota_0 capacity for THIS device's layout; 0 when the firmware predates it. */
+    val slotSize: Long,
+    /** Version currently installed, for previewing the updater's downgrade rule. */
+    val runningVersion: String,
     val runningPartition: String,
     val phase: String,
     val journalSequence: Long,
@@ -296,6 +362,8 @@ data class OtaDeviceStatus(
                 available = value.optBoolean("available"),
                 board = value.optString("board"),
                 layout = value.optString("layout"),
+                slotSize = value.optLong("slotSize"),
+                runningVersion = value.optString("runningVersion"),
                 runningPartition = value.optString("runningPartition"),
                 phase = value.optString("phase"),
                 journalSequence = value.optLong("journalSequence"),

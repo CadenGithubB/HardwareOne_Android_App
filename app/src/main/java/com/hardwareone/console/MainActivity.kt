@@ -16,6 +16,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.LaunchedEffect
@@ -25,6 +28,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
@@ -45,11 +50,14 @@ import com.hardwareone.console.ui.AutomationsScreen
 import com.hardwareone.console.ui.EspNowBondScreen
 import com.hardwareone.console.ui.EspNowScreen
 import com.hardwareone.console.ui.FilesScreen
+import com.hardwareone.console.ui.HealthScreen
 import com.hardwareone.console.ui.HeaderNav
 import com.hardwareone.console.ui.LlmChatScreen
 import com.hardwareone.console.ui.LoginDialog
 import com.hardwareone.console.ui.MapsScreen
 import com.hardwareone.console.ui.MicScreen
+import com.hardwareone.console.ui.NotificationBanner
+import com.hardwareone.console.ui.NotificationsScreen
 import com.hardwareone.console.ui.OtaScreen
 import com.hardwareone.console.ui.LogViewerScreen
 import com.hardwareone.console.ui.SavedLogsScreen
@@ -93,6 +101,7 @@ class MainActivity : FragmentActivity() {
         data object Status : Screen
         data object Perf : Screen
         data object Sensors : Screen
+        data object Health : Screen
         data object LlmChat : Screen
         data object Files : Screen
         data object Ota : Screen
@@ -103,6 +112,7 @@ class MainActivity : FragmentActivity() {
         data object EspNowBond : Screen
         data class EspNowDevice(val mac: String, val name: String) : Screen
         data object SavedLogs : Screen
+        data object Notifications : Screen
         data class Viewer(val fileName: String, val title: String, val text: String) : Screen
     }
 
@@ -188,6 +198,14 @@ class MainActivity : FragmentActivity() {
                 // for whichever page is showing — the device-tool dropdown is gated on login
                 // (the tools are all account-gated anyway).
                 val loggedIn by vm.authenticated.collectAsState()
+                val unreadAlerts by vm.unreadNotifications.collectAsState()
+                // Device tools this firmware build doesn't contain — the nav greys them out with
+                // the reason rather than hiding them.
+                val deviceCaps by vm.capabilities.collectAsState()
+                val unsupportedCmds by vm.unsupportedCommands.collectAsState()
+                val unavailableTools = remember(deviceCaps, unsupportedCmds) {
+                    vm.unavailableTools(deviceCaps, unsupportedCmds)
+                }
                 val goDevices = { nav.clear(); topPage = AppPage.DEVICES }
                 fun openTool(screen: Screen) { nav.clear(); navTo(screen) }
                 // `current` is the tool screen showing (null on the Console/Devices top pages).
@@ -208,6 +226,7 @@ class MainActivity : FragmentActivity() {
                         Screen.Status -> "Status"
                         Screen.Perf -> "Perf"
                         Screen.Sensors -> "Sensors"
+                        Screen.Health -> "R1 Health"
                         Screen.LlmChat -> "LLM Chat"
                         Screen.Files -> "Files"
                         Screen.Ota -> "OTA"
@@ -223,6 +242,7 @@ class MainActivity : FragmentActivity() {
                     onOpenStatus = ({ openTool(Screen.Status) }).takeIf { current != Screen.Status },
                     onOpenPerf = ({ openTool(Screen.Perf) }).takeIf { current != Screen.Perf },
                     onOpenSensors = ({ openTool(Screen.Sensors) }).takeIf { current != Screen.Sensors },
+                    onOpenHealth = ({ vm.refreshHealthStatus(); vm.loadHealthLog(); openTool(Screen.Health) }).takeIf { current != Screen.Health },
                     onOpenLlm = ({ openTool(Screen.LlmChat) }).takeIf { current != Screen.LlmChat },
                     onOpenFiles = ({ vm.loadFiles("/"); openTool(Screen.Files) }).takeIf { current != Screen.Files },
                     onOpenOta = ({ vm.refreshOtaStatus(); openTool(Screen.Ota) }).takeIf { current != Screen.Ota },
@@ -238,8 +258,15 @@ class MainActivity : FragmentActivity() {
                     onSyncClock = vm::syncClock,
                     onSaveLog = onSaveLog,
                     onClearLog = onClearLog,
+                    unreadNotifications = unreadAlerts,
+                    unavailableTools = unavailableTools,
+                    // Pushed, not cleared-and-pushed: Back should return you to whatever page
+                    // the alert interrupted.
+                    onOpenNotifications = ({ vm.markNotificationsRead(); navTo(Screen.Notifications) })
+                        .takeIf { nav.lastOrNull() != Screen.Notifications },
                 )
 
+                Box(Modifier.fillMaxSize()) {
                 when (val screen = nav.lastOrNull()) {
                     null -> when (topPage) {
                         AppPage.CONSOLE -> ConsoleScreen(
@@ -284,7 +311,9 @@ class MainActivity : FragmentActivity() {
                         val secureLocked by vm.secureChannelLocked.collectAsState()
                         SettingsScreen(
                             themePref = themePref,
-                            onThemeChange = { themePref = it; ThemeStore.save(this, it) },
+                            // this@MainActivity, not `this`: the surrounding Box makes the
+                            // implicit receiver a BoxScope.
+                            onThemeChange = { themePref = it; ThemeStore.save(this@MainActivity, it) },
                             securityAvailable = vm.canUseCredentialStore,
                             hasSavedCredentials = hasSaved,
                             savedUsername = savedUser,
@@ -447,6 +476,7 @@ class MainActivity : FragmentActivity() {
                     Screen.Perf -> {
                         val perfTop by vm.perfTop.collectAsState()
                         val taskStats by vm.taskStats.collectAsState()
+                        val taskStatsError by vm.taskStatsError.collectAsState()
                         val memReport by vm.memReport.collectAsState()
                         val fsUsage by vm.fsUsage.collectAsState()
                         var perfPage by remember { mutableStateOf(PerfPage.CPU) }
@@ -468,6 +498,7 @@ class MainActivity : FragmentActivity() {
                         PerfScreen(
                             perfTop = perfTop,
                             taskStats = taskStats,
+                            taskStatsError = taskStatsError,
                             memReport = memReport,
                             fsUsage = fsUsage,
                             page = perfPage,
@@ -753,6 +784,31 @@ class MainActivity : FragmentActivity() {
                         )
                     }
 
+                    Screen.Health -> {
+                        val healthStatus by vm.healthStatus.collectAsState()
+                        val healthLog by vm.healthLog.collectAsState()
+                        val healthBusy by vm.healthBusy.collectAsState()
+                        val healthError by vm.healthError.collectAsState()
+                        HealthScreen(
+                            status = healthStatus,
+                            log = healthLog,
+                            busy = healthBusy,
+                            error = healthError,
+                            onRefresh = { vm.refreshHealthStatus(); vm.loadHealthLog() },
+                            onToggleLogging = vm::setHealthLogging,
+                            nav = headerNav(active = AppPage.DEVICES, onOpenDevices = goDevices, current = Screen.Health),
+                        )
+                    }
+
+                    Screen.Notifications -> {
+                        val alerts by vm.notifications.collectAsState()
+                        NotificationsScreen(
+                            cards = alerts,
+                            onMuteKind = vm::muteNotificationKind,
+                            onBack = { navBack() },
+                        )
+                    }
+
                     is Screen.Viewer -> LogViewerScreen(
                         title = screen.title,
                         text = screen.text,
@@ -760,6 +816,24 @@ class MainActivity : FragmentActivity() {
                         onDelete = { vm.deleteSavedLog(screen.fileName); navBack() },
                         onBack = { navBack() },
                     )
+                }
+
+                // Device notification cards, overlaid on every page — the device already judged
+                // these interrupt-worthy for this user, so they must not be page-scoped. The
+                // auto-dismiss timer lives in the ViewModel so it survives navigation.
+                val activeAlert by vm.activeNotification.collectAsState()
+                if (nav.lastOrNull() != Screen.Notifications) {
+                    NotificationBanner(
+                        card = activeAlert,
+                        onDismiss = vm::dismissActiveNotification,
+                        onOpenAll = {
+                            vm.dismissActiveNotification()
+                            vm.markNotificationsRead()
+                            navTo(Screen.Notifications)
+                        },
+                        modifier = Modifier.align(Alignment.TopCenter).systemBarsPadding(),
+                    )
+                }
                 }
 
                 // Login dialog as a global overlay so it works from any page (Console *and*

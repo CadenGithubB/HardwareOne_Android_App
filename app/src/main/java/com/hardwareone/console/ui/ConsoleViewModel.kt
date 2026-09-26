@@ -8,6 +8,7 @@ import com.hardwareone.console.ble.BleMessage
 import com.hardwareone.console.ble.ChatMessage
 import com.hardwareone.console.ble.CameraStatus
 import com.hardwareone.console.ble.ConnectionState
+import com.hardwareone.console.ble.DeviceNotification
 import com.hardwareone.console.ble.DiscoveredDevice
 import com.hardwareone.console.ble.FileReadChunk
 import com.hardwareone.console.ble.ImageItem
@@ -18,6 +19,7 @@ import com.hardwareone.console.ble.OtaBundle
 import com.hardwareone.console.ble.OtaDeviceStatus
 import com.hardwareone.console.ble.OtaStep
 import com.hardwareone.console.ble.OtaUiState
+import com.hardwareone.console.ble.OtaWriteStatus
 import com.hardwareone.console.ble.RecordingItem
 import com.hardwareone.console.security.CredentialStore
 import com.hardwareone.console.security.LogVault
@@ -33,6 +35,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
+import java.security.MessageDigest
 import javax.crypto.Cipher
 
 /** One console line, tagged so the UI can colour it. */
@@ -86,6 +89,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     val perfTop: StateFlow<com.hardwareone.console.ble.PerfTop?> = _perfTop.asStateFlow()
     private val _taskStats = MutableStateFlow<com.hardwareone.console.ble.TaskStats?>(null)
     val taskStats: StateFlow<com.hardwareone.console.ble.TaskStats?> = _taskStats.asStateFlow()
+    /** Why the Stack page has no data, when it has none — see [onTaskStatsCapture]. */
+    private val _taskStatsError = MutableStateFlow<String?>(null)
+    val taskStatsError: StateFlow<String?> = _taskStatsError.asStateFlow()
 
     // --- On-device LLM chat ---
     private val _llmStatus = MutableStateFlow<com.hardwareone.console.ble.LlmStatus?>(null)
@@ -145,6 +151,12 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private var writeSentFinal = false
     private enum class WriteOwner { FILE_BROWSER, OTA_FIRMWARE, OTA_MANIFEST }
     private var writeOwner = WriteOwner.FILE_BROWSER
+    // Effective OTA burst size, halved on a stalled checkpoint and grown back on
+    // progress, so a device that cannot drain its command queue degrades to the
+    // old conservative cadence instead of livelocking.
+    private var otaBatchChunks = OTA_BLE_BATCH_CHUNKS
+    private var otaStallStrikes = 0
+    private var otaCheckpointRetries = 0
 
     // --- Signed offline OTA (local .hw1ota bundle -> secure BLE -> recovery updater) ---
     private val _ota = MutableStateFlow(OtaUiState())
@@ -411,12 +423,48 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     private val _logTotal = MutableStateFlow(0L)
     val logTotal: StateFlow<Long> = _logTotal.asStateFlow()
 
+    // --- Device notification cards ---------------------------------------------------
+    //
+    // Unsolicited cards pushed by the device's notification system (see [DeviceNotification]).
+    // Two surfaces: a transient banner over whatever page is showing (the device already
+    // decided this is interrupt-worthy for this user) and a persistent list behind the header
+    // bell. Both are session-scoped — cards were filtered for the logged-in user, so they are
+    // dropped on logout or disconnect.
+
+    /** Newest first, capped at [NOTIFICATION_HISTORY_MAX]. */
+    private val _notifications = MutableStateFlow<List<DeviceNotification>>(emptyList())
+    val notifications: StateFlow<List<DeviceNotification>> = _notifications.asStateFlow()
+
+    private val _unreadNotifications = MutableStateFlow(0)
+    val unreadNotifications: StateFlow<Int> = _unreadNotifications.asStateFlow()
+
+    /** The card currently in the banner, or null when nothing is showing. */
+    private val _activeNotification = MutableStateFlow<DeviceNotification?>(null)
+    val activeNotification: StateFlow<DeviceNotification?> = _activeNotification.asStateFlow()
+
+    private val bannerQueue = ArrayDeque<DeviceNotification>()
+    private var bannerJob: Job? = null
+
     val bluetoothSupported: Boolean get() = ble.isBluetoothSupported
     val bluetoothEnabled: Boolean get() = ble.isBluetoothEnabled
 
     init {
         viewModelScope.launch {
-            ble.incoming.collect { append(LogEntry(it.trimEnd('\n'), LogEntry.Kind.INCOMING)) }
+            ble.incoming.collect {
+                noteUnsupportedCommand(it)
+                append(LogEntry(it.trimEnd('\n'), LogEntry.Kind.INCOMING))
+            }
+        }
+        viewModelScope.launch {
+            ble.notifications.collect { card ->
+                // Mirror into the console first. Cards are best-effort — the device drops them
+                // rather than queueing when the link is busy — so the console stays the complete
+                // record of what DID arrive, and a saved log carries them with everything else.
+                append(LogEntry("🔔 ${card.title}: ${card.msg}", LogEntry.Kind.INFO))
+                _notifications.value = (listOf(card) + _notifications.value).take(NOTIFICATION_HISTORY_MAX)
+                _unreadNotifications.value = _unreadNotifications.value + 1
+                showBanner(card)
+            }
         }
         viewModelScope.launch {
             ble.messages.collect { msg ->
@@ -428,6 +476,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             ble.authenticated.collect { authed ->
                 _currentUser.value = if (authed) pendingUser else null
+                // Cards passed the *logged-in user's* filters on the device, so they must not
+                // outlive that session. This covers disconnect too: every close path clears
+                // `authenticated`.
+                if (!authed) clearNotifications()
+                // `features json` is admin-gated, so this is the first moment we can ask what
+                // this build actually contains.
+                if (authed) loadCapabilities()
                 if (authed) refreshBattery() // battery may need auth — fetch right after login
                 if (authed && otaAwaitingReturn && connectionState.value is ConnectionState.Ready) {
                     requestOtaMonitor()
@@ -451,6 +506,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                 } else {
+                    // What the device can do is a property of the device we were talking to, not
+                    // of the app — the next one may be a different board.
+                    _unsupportedCommands.value = emptySet()
+                    _capabilities.value = null
                     _filesBusy.value = false
                     if (writeOwner != WriteOwner.FILE_BROWSER && writeBytes != null) {
                         failOta("Bluetooth disconnected while the OTA package was being staged. Reconnect and restart the upload.")
@@ -508,10 +567,33 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag.startsWith(TAG_SENSOR_READ) -> onSensorRead(tag.removePrefix(TAG_SENSOR_READ), capture.text, capture.timedOut)
                         tag == TAG_CONTROL_MODULES -> onControlModulesCapture(capture.text)
                         tag == TAG_BATTERY -> onBatteryCapture(capture.text, capture.timedOut)
+                        tag == TAG_HEALTH_STATUS -> {
+                            if (!capture.timedOut) {
+                                com.hardwareone.console.ble.HealthStatus.parse(capture.text)
+                                    ?.let { _healthStatus.value = it }
+                            }
+                        }
+                        tag == TAG_HEALTH_READ -> onHealthReadCapture(capture.text, capture.timedOut)
+                        tag == TAG_FEATURES -> {
+                            // A device too old to have the registry just leaves this null, and
+                            // every gate stays permissive — the reactive layer still covers it.
+                            if (!capture.timedOut) {
+                                com.hardwareone.console.ble.DeviceCapabilities.parse(capture.text)?.let {
+                                    _capabilities.value = it
+                                    val missing = it.features.filter { f -> !f.compiled }
+                                    if (missing.isNotEmpty()) {
+                                        append(LogEntry(
+                                            "Device build omits: ${missing.joinToString(", ") { f -> f.name }}",
+                                            LogEntry.Kind.INFO,
+                                        ))
+                                    }
+                                }
+                            }
+                        }
                         tag == TAG_MEMREPORT -> { if (!capture.timedOut) com.hardwareone.console.ble.MemReport.parse(capture.text)?.let { _memReport.value = it } }
                         tag == TAG_FSUSAGE -> { if (!capture.timedOut) com.hardwareone.console.ble.FsUsage.parse(capture.text)?.let { _fsUsage.value = it } }
                         tag == TAG_PERFTOP -> { if (!capture.timedOut) com.hardwareone.console.ble.PerfTop.parse(capture.text)?.let { _perfTop.value = it } }
-                        tag == TAG_TASKSTATS -> { if (!capture.timedOut) com.hardwareone.console.ble.TaskStats.parse(capture.text)?.let { _taskStats.value = it } }
+                        tag == TAG_TASKSTATS -> onTaskStatsCapture(capture.text, capture.timedOut)
                         tag == TAG_LLM_STATUS -> onLlmStatusCapture(capture.text)
                         tag == TAG_LLM_MODELS -> com.hardwareone.console.ble.LlmStatus.parseModels(capture.text)?.let { _llmModels.value = it }
                         tag == TAG_LLM_GEN -> onLlmGenStart(capture.text, capture.timedOut)
@@ -520,6 +602,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         tag == TAG_FILE_STATS -> onFileStatsCapture(capture.text)
                         tag == TAG_FILE_READ -> onFileReadCapture(capture.text, capture.timedOut)
                         tag == TAG_FILE_WRITE -> onFileWriteCapture(capture.text, capture.timedOut)
+                        tag == TAG_OTA_WRITE_BEGIN || tag == TAG_OTA_WRITE_BATCH ||
+                            tag == TAG_OTA_WRITE_FINISH -> onOtaWriteCapture(tag, capture.text, capture.timedOut)
                         tag.startsWith(TAG_OTA_PREFIX) -> onOtaStatusCapture(tag, capture.text, capture.timedOut)
                         tag == TAG_EN_MODE -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowMode.parse(capture.text)?.let { _espNowMode.value = it } }
                         tag == TAG_EN_ENC -> { if (!capture.timedOut) com.hardwareone.console.ble.EspNowEnc.parse(capture.text)?.let { _espNowEnc.value = it } }
@@ -617,6 +701,79 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
     fun disconnect() = ble.disconnect()
+
+    // --- Notification banner / centre -------------------------------------------------
+
+    /**
+     * Queue [card] for the transient banner.
+     *
+     * Consecutive cards of the same kind collapse instead of stacking: a mesh flap or a
+     * flapping sensor emits one kind over and over, and a strict FIFO would make the banner
+     * thrash for a minute while showing nothing new. Newest text wins; the full sequence is
+     * still in the notification centre and the console.
+     */
+    private fun showBanner(card: DeviceNotification) {
+        val showing = _activeNotification.value
+        if (showing != null && card.kind.isNotEmpty() && showing.kind == card.kind) {
+            _activeNotification.value = card
+            startBannerTimer(card)
+            return
+        }
+        if (card.kind.isNotEmpty()) bannerQueue.removeAll { it.kind == card.kind }
+        if (showing == null) {
+            _activeNotification.value = card
+            startBannerTimer(card)
+        } else {
+            if (bannerQueue.size >= BANNER_QUEUE_MAX) bannerQueue.removeFirst()
+            bannerQueue.addLast(card)
+        }
+    }
+
+    private fun startBannerTimer(card: DeviceNotification) {
+        bannerJob?.cancel()
+        bannerJob = viewModelScope.launch {
+            // The device's suggested duration is advisory — clamp it so a firmware value of 0
+            // (or 60000) can't make the banner unreadable or unshakeable.
+            delay(card.durationMs.coerceIn(BANNER_MIN_MS, BANNER_MAX_MS).toLong())
+            dismissActiveNotification()
+        }
+    }
+
+    /** Dismiss the banner and show the next queued card, if any. */
+    fun dismissActiveNotification() {
+        bannerJob?.cancel()
+        bannerJob = null
+        val next = bannerQueue.removeFirstOrNull()
+        _activeNotification.value = next
+        if (next != null) startBannerTimer(next)
+    }
+
+    private fun clearNotifications() {
+        bannerJob?.cancel()
+        bannerJob = null
+        bannerQueue.clear()
+        _activeNotification.value = null
+        _notifications.value = emptyList()
+        _unreadNotifications.value = 0
+    }
+
+    fun markNotificationsRead() { _unreadNotifications.value = 0 }
+
+    /**
+     * Stop this event kind from notifying *this user*, on every surface (banner, web toast,
+     * G2 lens, app). The device's per-user mute list is the one place this belongs — it is
+     * why the wire format carries the kind NAME rather than an internal number.
+     */
+    fun muteNotificationKind(kind: String) {
+        if (kind.isBlank() || connectionState.value !is ConnectionState.Ready) return
+        ble.sendCommand("notifyusermute $kind")
+    }
+
+    /** Raise/lower this user's importance floor (`info`/`success`/`warning`/`error`). */
+    fun setNotificationLevel(tier: String) {
+        if (tier.isBlank() || connectionState.value !is ConnectionState.Ready) return
+        ble.sendCommand("notifylevel $tier")
+    }
     fun reconnect() = ble.reconnect()
     fun dismissSecureFailure() = ble.dismissSecureFailure()
     fun readStatus() = ble.readStatus()
@@ -648,9 +805,252 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _battery.value = null
     }
 
+    // --- Device capabilities ----------------------------------------------------------
+    //
+    // HardwareOne is configured per board at COMPILE time, so a device can genuinely lack
+    // commands this app knows about — your XIAO carrier build sets I2C_FEATURE_LEVEL 0, which
+    // drops the whole I²C layer and with it `sensors` and `devices`. Asking anyway is not free:
+    // the device answers `Unknown command: <verb> ***`, which is not JSON, so the capture never
+    // completes and burns its FULL timeout. Captures are serialised, so one absent command
+    // starves every other page's fetches. That is the bug this pair of layers exists to kill.
+    //
+    // Two layers, because neither alone is enough:
+    //
+    //  1. PROACTIVE — `features json` after login, the device's own registry of what its build
+    //     contains. Lets the app gate navigation and polling BEFORE asking, so nothing is wasted
+    //     and absent pages can say why. This is the primary source of truth.
+    //  2. REACTIVE — remember any verb the device answered `Unknown command` for. Covers what
+    //     the registry does not list (`batterystatus` has no feature entry) and any firmware too
+    //     old to have a registry at all. One wasted round-trip, then never again.
+    //
+    // Both reset on disconnect: which commands exist is a fact about the device we were talking
+    // to, and the next one may be a different board.
+
+    private val _capabilities = MutableStateFlow<com.hardwareone.console.ble.DeviceCapabilities?>(null)
+    val capabilities: StateFlow<com.hardwareone.console.ble.DeviceCapabilities?> = _capabilities.asStateFlow()
+
+    // Observable, not a plain Set: the nav greys entries out from this too, so Compose has to
+    // recompose when a verb is added.
+    private val _unsupportedCommands = MutableStateFlow<Set<String>>(emptySet())
+    val unsupportedCommands: StateFlow<Set<String>> = _unsupportedCommands.asStateFlow()
+
+    /** Fetch the device's feature registry. Admin-gated, so this runs after login. */
+    private fun loadCapabilities() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        ble.sendCaptured("features json", TAG_FEATURES)
+    }
+
+    private fun noteUnsupportedCommand(line: String) {
+        if (!line.startsWith(UNKNOWN_CMD_PREFIX)) return
+        val verb = line.removePrefix(UNKNOWN_CMD_PREFIX).trim().substringBefore(' ')
+        if (verb.isEmpty() || verb in _unsupportedCommands.value) return
+        _unsupportedCommands.value = _unsupportedCommands.value + verb
+        append(LogEntry("This device has no '$verb' command — the app will stop asking for it.", LogEntry.Kind.INFO))
+    }
+
+    /**
+     * The single gate every device-dependent request goes through: true when this device is known
+     * to have the feature AND has not already rejected any of [verbs].
+     *
+     * Both checks default to permissive — an unknown feature or an unseen verb is assumed present
+     * — so a device that never reports capabilities behaves exactly as it did before.
+     */
+    private fun deviceSupports(featureId: String?, vararg verbs: String): Boolean {
+        if (featureId != null && _capabilities.value?.isCompiled(featureId) == false) return false
+        return verbs.none { it in _unsupportedCommands.value }
+    }
+
+    /** Is this feature absent from the device's build? Drives the "not in this build" copy. */
+    fun featureMissing(featureId: String): Boolean =
+        _capabilities.value?.isCompiled(featureId) == false
+
+    /**
+     * What a device tool needs. [featureId] is the proactive signal — an entry in the device's
+     * feature registry. [verbs] are the reactive one, for tools the registry does NOT cover:
+     * `ENABLE_MAPS` has no registry entry, so a mapless build is only discoverable by asking and
+     * being told `Unknown command`.
+     *
+     * Labels must match the dropdown text in [UiCommon]'s PageToggle.
+     */
+    private data class ToolGate(val label: String, val featureId: String?, val verbs: List<String>)
+
+    private val toolGates = listOf(
+        ToolGate("Sensors", com.hardwareone.console.ble.DeviceCapabilities.FEATURE_I2C, listOf("sensors", "devices")),
+        ToolGate("R1 Health", "r1health", listOf("healthstatus")),
+        ToolGate("Camera", "camera", emptyList()),
+        ToolGate("Microphone", "microphone", emptyList()),
+        ToolGate("ESP-NOW", "espnow", emptyList()),
+        ToolGate("LLM Chat", "llm", emptyList()),
+        ToolGate("Automations", "automation", emptyList()),
+        // Registry-covered as of the `maps` entry; the verbs stay as a backstop for firmware
+        // older than that entry, where the id is simply absent and the feature check abstains.
+        ToolGate("Maps", "maps", listOf("maplist", "map", "waypoint")),
+    )
+
+    /**
+     * Device tools this build doesn't contain, as `dropdown label -> reason`. The nav renders
+     * these disabled rather than hiding them: on hardware you flash yourself, "absent because the
+     * build dropped it" beats a menu entry that silently vanished.
+     *
+     * Reads BOTH layers. Registry-covered tools grey out the moment capabilities arrive; the rest
+     * grey out once the device has rejected one of their commands. Taking only the registry left
+     * Maps looking available on a build compiled without it.
+     */
+    fun unavailableTools(
+        caps: com.hardwareone.console.ble.DeviceCapabilities?,
+        unsupported: Set<String>,
+    ): Map<String, String> = toolGates.mapNotNull { gate ->
+        val missingFeature = gate.featureId != null && caps?.isCompiled(gate.featureId) == false
+        val rejectedVerb = gate.verbs.any { it in unsupported }
+        if (missingFeature || rejectedVerb) gate.label to "Not in this firmware build" else null
+    }.toMap()
+
+    // --- R1 Health -------------------------------------------------------------------
+    //
+    // The ring talks to the ESP32 over the same BLE radio the phone is using, so it cannot be
+    // connected while the app is. Live vitals are therefore usually stale here, and the useful
+    // data is what the device already WROTE: the sensor log's r1_* columns.
+    //
+    // The richer typed history (30 days of hourly HR/HRV/SpO2 aggregates, activity buckets,
+    // sleep) is not reachable yet — R1_HealthHistoryStore exposes Stage/Tick/GetStatus and no
+    // read-back API, so nothing on the device can read those files, the web UI included.
+
+    private val _healthStatus = MutableStateFlow<com.hardwareone.console.ble.HealthStatus?>(null)
+    val healthStatus: StateFlow<com.hardwareone.console.ble.HealthStatus?> = _healthStatus.asStateFlow()
+
+    private val _healthLog = MutableStateFlow<com.hardwareone.console.ble.HealthLog?>(null)
+    val healthLog: StateFlow<com.hardwareone.console.ble.HealthLog?> = _healthLog.asStateFlow()
+
+    private val _healthBusy = MutableStateFlow(false)
+    val healthBusy: StateFlow<Boolean> = _healthBusy.asStateFlow()
+
+    private val _healthError = MutableStateFlow<String?>(null)
+    val healthError: StateFlow<String?> = _healthError.asStateFlow()
+
+    // Tail-read state. Deliberately its own small loop rather than borrowing the Files page's
+    // reader: that one ends in either the file viewer or the save picker, and a third owner would
+    // widen the cross-claim window its correlation guard already exists to close.
+    private var healthPath = ""
+    private var healthHeader: String? = null
+    private var healthReadOffset = 0L
+    private val healthBuf = StringBuilder()
+
+    /** Status only — cheap, and the one part that stays true with the ring away. */
+    fun refreshHealthStatus() {
+        if (connectionState.value !is ConnectionState.Ready) return
+        if (!deviceSupports("r1health", "healthstatus")) {
+            _healthError.value = "This firmware was built without R1 Health support."
+            return
+        }
+        ble.sendCaptured("healthstatus json", TAG_HEALTH_STATUS)
+    }
+
+    /**
+     * Load logged ring samples from the device's sensor log.
+     *
+     * Reads the FIRST window (header + the file's total size, which the reply carries), then jumps
+     * to the tail. A log that has been running for days is far too big to pull over BLE at ~2 KB a
+     * round-trip, and the recent end is what a chart wants — so only the last
+     * [HEALTH_TAIL_BYTES] are fetched, and the partial row that a mid-file offset lands in is
+     * discarded rather than mis-parsed.
+     */
+    fun loadHealthLog(path: String = DEFAULT_HEALTH_LOG) {
+        if (connectionState.value !is ConnectionState.Ready || _healthBusy.value) return
+        if (!deviceSupports("r1health", "healthstatus")) {
+            _healthError.value = "This firmware was built without R1 Health support."
+            return
+        }
+        healthPath = path
+        healthHeader = null
+        healthReadOffset = 0L
+        healthBuf.setLength(0)
+        _healthError.value = null
+        _healthBusy.value = true
+        ble.sendCaptured("fileread ${q(path)} 0 $HEALTH_READ_WINDOW", TAG_HEALTH_READ)
+    }
+
+    private fun onHealthReadCapture(text: String, timedOut: Boolean) {
+        if (timedOut) { failHealth("Timed out reading ${healthPath.substringAfterLast('/')}."); return }
+        val r = com.hardwareone.console.ble.FileReadChunk.parse(text)
+            ?: run { failHealth("Unexpected reply while reading the log."); return }
+        if (!r.success) {
+            failHealth(
+                if (r.error?.contains("not found", ignoreCase = true) == true ||
+                    r.error?.contains("No such", ignoreCase = true) == true
+                ) {
+                    "No log at $healthPath yet. Turn health logging on and give it time to record."
+                } else {
+                    "Couldn't read the log: ${r.error}"
+                },
+            )
+            return
+        }
+        // Drop a window that belongs to another fileread loop (Files/Maps run the same command)
+        // and re-ask for ours, mirroring the guard the file browser already uses.
+        if (r.offset != healthReadOffset || (r.path.isNotEmpty() && r.path != healthPath)) {
+            ble.sendCaptured("fileread ${q(healthPath)} $healthReadOffset $HEALTH_READ_WINDOW", TAG_HEALTH_READ)
+            return
+        }
+        val chunk = if (r.enc == "b64") {
+            runCatching {
+                String(android.util.Base64.decode(r.data, android.util.Base64.DEFAULT), Charsets.UTF_8)
+            }.getOrDefault("")
+        } else {
+            r.data
+        }
+
+        // First window: keep the header, then decide whether to jump.
+        if (healthHeader == null) {
+            healthHeader = chunk.lineSequence().firstOrNull { it.contains("r1_") || it.contains(',') }
+            val tailStart = r.size - HEALTH_TAIL_BYTES
+            if (!r.eof && tailStart > r.offset + r.len) {
+                healthReadOffset = tailStart
+                healthBuf.setLength(0)
+                ble.sendCaptured("fileread ${q(healthPath)} $healthReadOffset $HEALTH_READ_WINDOW", TAG_HEALTH_READ)
+                return
+            }
+            // Small file: the rest follows this window directly, so keep everything after the
+            // header line and fall through to the normal accumulate path.
+            healthBuf.append(chunk.substringAfter('\n', ""))
+        } else {
+            healthBuf.append(chunk)
+        }
+        healthReadOffset += r.len
+
+        if (r.eof || r.len == 0) {
+            var body = healthBuf.toString()
+            // A tail offset almost certainly landed mid-row; that first fragment is not a record.
+            if (healthReadOffset > body.length + HEALTH_READ_WINDOW) body = body.substringAfter('\n', "")
+            _healthLog.value = com.hardwareone.console.ble.HealthLog.parse(body, healthHeader)
+            _healthBusy.value = false
+            if (_healthLog.value?.samples.isNullOrEmpty()) {
+                _healthError.value = "The log has no ring readings in it. Check that 'r1' is in " +
+                    "the sensor-log selection and the ring has been worn since logging started."
+            }
+        } else {
+            ble.sendCaptured("fileread ${q(healthPath)} $healthReadOffset $HEALTH_READ_WINDOW", TAG_HEALTH_READ)
+        }
+    }
+
+    private fun failHealth(message: String) {
+        _healthBusy.value = false
+        _healthError.value = message
+    }
+
+    /** Turn the device's health logging on or off (`healthlogging on|off`). */
+    fun setHealthLogging(on: Boolean) {
+        if (connectionState.value !is ConnectionState.Ready) return
+        if (!deviceSupports("r1health", "healthlogging")) return
+        ble.sendCommand("healthlogging ${if (on) "on" else "off"}")
+        refreshHealthStatus()
+    }
+
     /** Fetch battery telemetry (`batterystatus json`), captured off-console. */
     fun refreshBattery() {
         if (connectionState.value !is ConnectionState.Ready) return
+        // `battery` is registry-covered now, so a board without the monitor is known before the
+        // first poll; the verb stays as the backstop for firmware predating that entry.
+        if (!deviceSupports("battery", "batterystatus")) return
         ble.sendCaptured("batterystatus json", TAG_BATTERY)
     }
 
@@ -666,6 +1066,12 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun loadI2cDevices(silent: Boolean = false) {
         if (connectionState.value !is ConnectionState.Ready) return
+        // `devices` lives in the I²C command module; a build without that layer has no such
+        // command, and the Status page polls this every 6 s.
+        if (!deviceSupports(com.hardwareone.console.ble.DeviceCapabilities.FEATURE_I2C, "devices")) {
+            _i2cLoading.value = false
+            return
+        }
         if (!silent || _i2cDevices.value == null) _i2cLoading.value = true
         ble.sendCaptured("devices json", TAG_DEVICES)
     }
@@ -691,10 +1097,37 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         ble.sendCaptured("perftop json", TAG_PERFTOP)
     }
 
-    /** Stack page: per-task state/prio/stack min-free (`taskstats json`). */
+    /** Stack page: per-task state/prio/stack figures (`taskstats json`). */
     fun refreshPerfStack() {
         if (connectionState.value !is ConnectionState.Ready) return
+        _taskStatsError.value = null
         ble.sendCaptured("taskstats json", TAG_TASKSTATS)
+    }
+
+    /**
+     * Resolve a `taskstats json` reply, including the ways it can arrive unusable.
+     *
+     * A reply that starts with '{' but never closes leaves the capture waiting for a brace that
+     * never comes, so it "times out" holding a partial buffer. Left unhandled the Stack page
+     * spins forever — the worst of the outcomes, because it reads as a hang rather than a
+     * failure. Report the symptom; the app cannot see the cause. Dropped BLE fragments and a
+     * reply too big for the device's 4 KB serialisation buffer look identical from here (that
+     * buffer is only a real ceiling well past 40 tasks — a typical board is nowhere near it).
+     */
+    private fun onTaskStatsCapture(text: String, timedOut: Boolean) {
+        val parsed = if (timedOut) null else com.hardwareone.console.ble.TaskStats.parse(text)
+        if (parsed != null) {
+            _taskStats.value = parsed
+            _taskStatsError.value = null
+            return
+        }
+        _taskStatsError.value = when {
+            // Partial JSON: a reply started but never completed.
+            text.trimStart().startsWith("{") ->
+                "The device's task list arrived incomplete (${text.length} chars, no closing brace)."
+            timedOut && text.isBlank() -> "No reply from the device."
+            else -> "Couldn't read the device's task list."
+        }
     }
 
     /** Drop cached perf snapshots (call when leaving the Perf page). */
@@ -703,6 +1136,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _fsUsage.value = null
         _perfTop.value = null
         _taskStats.value = null
+        _taskStatsError.value = null
     }
 
     // --- ESP-NOW page ----------------------------------------------------------------
@@ -1280,6 +1714,14 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             _sensorsError.value = "Not connected."
             return
         }
+        // Say what is actually true instead of asking a command this build doesn't have and then
+        // reporting the resulting silence as "No response from device."
+        if (!deviceSupports(com.hardwareone.console.ble.DeviceCapabilities.FEATURE_I2C, "sensors")) {
+            _sensorsLoading.value = false
+            _sensorsError.value = "This firmware was built without the I²C/sensor layer, so it " +
+                "has no sensors to report. Raise I2C_FEATURE_LEVEL and reflash to enable them."
+            return
+        }
         _sensorsLoading.value = true
         ble.sendCaptured("sensors json brief", TAG_SENSORS)
     }
@@ -1675,6 +2117,31 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- Signed offline OTA -----------------------------------------------------------
 
+    /**
+     * Why this package cannot go onto the connected device, or null if nothing
+     * the device has told us rules it out.
+     *
+     * Uses ONLY facts the device reports. It is deliberately not a second copy
+     * of the updater's rules -- that is what the removed board -> layout table
+     * was, and it rejected valid packages whenever a new deployment appeared.
+     * Its whole job is to fail in milliseconds rather than after a multi-minute
+     * transfer; anything it cannot know, it lets through for the device to
+     * decide authoritatively.
+     */
+    private fun otaPackageRejection(bundle: OtaBundle, device: OtaDeviceStatus?): String? {
+        if (device == null || device.board.isEmpty()) return null
+        if (device.board != bundle.board || device.layout != bundle.layout) {
+            return "Package is ${bundle.board} / ${bundle.layout}; " +
+                "device is ${device.board} / ${device.layout}."
+        }
+        // slotSize is 0 on firmware predating it: unknown, so not a rejection.
+        if (device.slotSize > 0 && bundle.imageSize > device.slotSize) {
+            return "Package image is ${bundle.imageSize} bytes; this device's " +
+                "ota_0 slot holds ${device.slotSize}."
+        }
+        return null
+    }
+
     /** Parse and authenticate a local .hw1ota bundle without network access. */
     fun importOtaBundle(name: String, bytes: ByteArray) {
         if (_ota.value.transferActive || otaAwaitingReturn) return
@@ -1690,17 +2157,14 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.Default) {
             runCatching { OtaBundle.parse(bytes) }
                 .onSuccess { bundle ->
-                    val device = _ota.value.device
-                    val mismatch = device?.takeIf {
-                        it.board.isNotEmpty() && (it.board != bundle.board || it.layout != bundle.layout)
-                    }
-                    if (mismatch != null) {
+                    val rejection = otaPackageRejection(bundle, _ota.value.device)
+                    if (rejection != null) {
                         _ota.value = _ota.value.copy(
                             step = OtaStep.FAILED,
                             packageName = name,
                             bundle = bundle,
                             message = "Package does not match the connected HardwareOne.",
-                            error = "Package is ${bundle.board} / ${bundle.layout}; device is ${mismatch.board} / ${mismatch.layout}.",
+                            error = rejection,
                         )
                     } else {
                         _ota.value = _ota.value.copy(
@@ -1746,6 +2210,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         if (otaStatusInFlight) return
+        // Never poll status during a transfer. The batch loop is already asking
+        // `otawrite status` ~every 2s, so this adds nothing -- but it is fired by
+        // Screen.Ota's LaunchedEffect every time the screen re-enters
+        // composition, which happens on ordinary navigation. That is how a
+        // 4 MB upload died on 2026-08-30: leaving for the notifications page and
+        // coming back injected an `otastatus json` mid-transfer.
+        if (_ota.value.transferActive) return
         otaStatusInFlight = true
         ble.sendCaptured("otastatus json", TAG_OTA_STATUS, OTA_STATUS_TIMEOUT_MS)
     }
@@ -1804,6 +2275,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelOtaTransfer() {
         if (!_ota.value.transferActive) return
         fileOpCancelled = true
+        if (connectionState.value is ConnectionState.Ready) ble.sendCommand("otawrite abort")
         writeBytes = null
         writeOffset = 0
         writeOwner = WriteOwner.FILE_BROWSER
@@ -1837,7 +2309,153 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         writeOwner = owner
         fileOpCancelled = false
         _filesBusy.value = true
-        sendNextWriteChunk()
+        otaBatchChunks = OTA_BLE_BATCH_CHUNKS
+        otaStallStrikes = 0
+        otaCheckpointRetries = 0
+        val member = when (owner) {
+            WriteOwner.OTA_FIRMWARE -> "candidate"
+            WriteOwner.OTA_MANIFEST -> "manifest"
+            WriteOwner.FILE_BROWSER -> return failOta("Internal OTA upload owner mismatch.")
+        }
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        ble.sendCaptured(
+            "otawrite begin $member ${bytes.size} $digest",
+            TAG_OTA_WRITE_BEGIN,
+            OTA_BLE_CHECKPOINT_TIMEOUT_MS,
+        )
+    }
+
+    private fun onOtaWriteCapture(tag: String, text: String, timedOut: Boolean) {
+        if (fileOpCancelled) return
+        if (timedOut || text.isBlank()) {
+            // A checkpoint is a pure query, and the device's accepted offset is
+            // authoritative, so a lost one is always safe to ask again. It can be
+            // lost outright: every secure-channel frame is handed to the device's
+            // command queue with a non-blocking enqueue that DROPS when full
+            // (Bluetooth.cpp submitDeferredToCmdExec), and a burst of OTA chunks
+            // can fill it. Re-asking after a pause lets the queue drain, instead
+            // of throwing away a multi-megabyte transfer over one dropped frame.
+            if (tag == TAG_OTA_WRITE_BATCH && otaCheckpointRetries < OTA_BLE_CHECKPOINT_RETRIES) {
+                otaCheckpointRetries++
+                _ota.value = _ota.value.copy(
+                    message = "Re-checking the device's accepted offset " +
+                        "($otaCheckpointRetries/$OTA_BLE_CHECKPOINT_RETRIES)…",
+                )
+                // Shrink the burst too: if the queue is under pressure, the next
+                // one should be gentler rather than repeating what just failed.
+                otaBatchChunks = (otaBatchChunks / 2).coerceAtLeast(1)
+                viewModelScope.launch {
+                    delay(OTA_BLE_CHECKPOINT_RETRY_DELAY_MS)
+                    if (!fileOpCancelled && writeBytes != null) {
+                        ble.sendCaptured(
+                            "otawrite status",
+                            TAG_OTA_WRITE_BATCH,
+                            OTA_BLE_CHECKPOINT_TIMEOUT_MS,
+                        )
+                    }
+                }
+                return
+            }
+            failOta("Bluetooth OTA checkpoint timed out. Reconnect and restart; the partial file was not promoted.")
+            return
+        }
+        otaCheckpointRetries = 0
+        val status = OtaWriteStatus.parse(text) ?: run {
+            failOta("Device returned an invalid Bluetooth OTA checkpoint.")
+            return
+        }
+        if (!status.success) {
+            failOta(status.error ?: "Device rejected the Bluetooth OTA upload.")
+            return
+        }
+        val bytes = writeBytes ?: return failOta("OTA package was released while uploading.")
+        val expectedMember = if (writeOwner == WriteOwner.OTA_FIRMWARE) "candidate" else "manifest"
+        if (status.member.isNotEmpty() && status.member != expectedMember) {
+            failOta("Device checkpoint belongs to '${status.member}', not '$expectedMember'.")
+            return
+        }
+        if (status.size !in 0L..bytes.size.toLong() ||
+            (status.expected > 0 && status.expected != bytes.size.toLong())
+        ) {
+            failOta("Device reported an impossible Bluetooth OTA offset (${status.size}/${status.expected}).")
+            return
+        }
+        // A batch checkpoint that accepted nothing means the device dropped every
+        // frame we just sent — its command queue was full, or the link is sick.
+        // Back off instead of re-sending the same burst forever; the offsets are
+        // authoritative, so this is always safe to retry, just slower.
+        if (tag == TAG_OTA_WRITE_BATCH && status.size <= writeOffset && writeOffset < bytes.size) {
+            otaStallStrikes++
+            otaBatchChunks = (otaBatchChunks / 2).coerceAtLeast(1)
+            if (otaStallStrikes >= OTA_BLE_MAX_STALLS) {
+                failOta(
+                    "Device stopped accepting Bluetooth OTA data at ${status.size} of ${bytes.size} bytes. " +
+                        "Move the phone closer and restart the update.",
+                )
+                return
+            }
+        } else if (tag == TAG_OTA_WRITE_BATCH) {
+            otaStallStrikes = 0
+            otaBatchChunks = (otaBatchChunks * 2).coerceAtMost(OTA_BLE_BATCH_CHUNKS)
+        }
+
+        writeOffset = status.size
+        val base = if (writeOwner == WriteOwner.OTA_MANIFEST)
+            (_ota.value.bundle?.imageSize?.toLong() ?: 0L) else 0L
+        _ota.value = _ota.value.copy(progressDone = base + writeOffset)
+
+        when (tag) {
+            TAG_OTA_WRITE_BEGIN, TAG_OTA_WRITE_BATCH -> {
+                if (writeOffset >= bytes.size) {
+                    ble.sendCaptured("otawrite finish", TAG_OTA_WRITE_FINISH, OTA_BLE_CHECKPOINT_TIMEOUT_MS)
+                } else {
+                    sendNextOtaBinaryBatch()
+                }
+            }
+            TAG_OTA_WRITE_FINISH -> {
+                if (!status.final || status.size != bytes.size.toLong()) {
+                    failOta("Device did not finalize the Bluetooth OTA staging member.")
+                    return
+                }
+                val completedOwner = writeOwner
+                writeBytes = null
+                writeOffset = 0
+                writeOwner = WriteOwner.FILE_BROWSER
+                _filesBusy.value = false
+                when (completedOwner) {
+                    WriteOwner.OTA_FIRMWARE -> startOtaManifestUpload()
+                    WriteOwner.OTA_MANIFEST -> verifyStagedOta()
+                    WriteOwner.FILE_BROWSER -> failOta("Internal OTA completion owner mismatch.")
+                }
+            }
+        }
+    }
+
+    /** Queue a burst, then ask the device for its exact accepted offset.
+     * The checkpoint makes queue pressure, a lost frame, or a reconnect loud
+     * and resumable without ever guessing which bytes reached LittleFS.
+     *
+     * Burst size is a throughput knob, not a safety one: chunks are acknowledged
+     * GATT write requests sent one at a time, so the device's command queue only
+     * holds the backlog between delivery and drain — a larger burst does not put
+     * more frames in that queue, it just amortises the checkpoint round-trip,
+     * which otherwise dominates transfer time. Frames the device does drop are
+     * caught by the very next checkpoint and simply re-sent. */
+    private fun sendNextOtaBinaryBatch() {
+        val bytes = writeBytes ?: return failOta("OTA package was released while uploading.")
+        val capacity = ble.otaChunkCapacity()
+        var offset = writeOffset.toInt().coerceIn(0, bytes.size)
+        var sent = 0
+        while (offset < bytes.size && sent < otaBatchChunks) {
+            val end = minOf(offset + capacity, bytes.size)
+            if (!ble.sendOtaChunk(offset.toLong(), bytes.copyOfRange(offset, end))) {
+                failOta("Bluetooth could not queue the next encrypted OTA chunk.")
+                return
+            }
+            offset = end
+            sent++
+        }
+        ble.sendCaptured("otawrite status", TAG_OTA_WRITE_BATCH, OTA_BLE_CHECKPOINT_TIMEOUT_MS)
     }
 
     private fun startOtaManifestUpload() {
@@ -1896,10 +2514,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         _ota.value = _ota.value.copy(device = status)
 
         val bundle = _ota.value.bundle
-        if (bundle != null && status.board.isNotEmpty() &&
-            (status.board != bundle.board || status.layout != bundle.layout)
-        ) {
-            failOta("Connected device identity changed and no longer matches this OTA package.")
+        val rejection = bundle?.let { otaPackageRejection(it, status) }
+        if (rejection != null) {
+            failOta("Connected device no longer matches this OTA package. $rejection")
             return
         }
 
@@ -2058,11 +2675,12 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         otaStatusInFlight = false
         otaPollJob?.cancel()
         otaReconnectJob?.cancel()
-        writeBytes = null
         if (writeOwner != WriteOwner.FILE_BROWSER) {
+            if (connectionState.value is ConnectionState.Ready) ble.sendCommand("otawrite abort")
             writeOwner = WriteOwner.FILE_BROWSER
             _filesBusy.value = false
         }
+        writeBytes = null
         _ota.value = _ota.value.copy(
             step = OtaStep.FAILED,
             message = "OTA could not continue.",
@@ -2273,6 +2891,12 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         // fileread — the "full page refresh" that interrupted downloads. The transfer + rendered
         // map both live in this ViewModel, so they survive the resume untouched.
         if (mapReadPurpose != MAP_READ_NONE) return
+        // ENABLE_MAPS is a compile-time flag with no feature-registry entry, so the reactive layer
+        // is the only signal here: ask once, then never again on this device.
+        if (!deviceSupports(null, "maplist", "map", "waypoint")) {
+            _mapsBusy.value = false
+            return
+        }
         _mapsBusy.value = true
         mapGpsMisses = 0
         mapSidecarUnavailable = false // a manual refresh re-probes fileread availability once
@@ -3449,6 +4073,11 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val MAX_LOG_LINES = 2000
+        const val UNKNOWN_CMD_PREFIX = "Unknown command: "
+        const val NOTIFICATION_HISTORY_MAX = 50
+        const val BANNER_QUEUE_MAX = 5
+        const val BANNER_MIN_MS = 1500
+        const val BANNER_MAX_MS = 8000
         const val TAG_STATUS = "status"
         const val TAG_DEVICES = "devices"
         const val TAG_SENSORS = "sensors"
@@ -3456,6 +4085,14 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_CONTROL_MODULES = "controlmods"
         const val TAG_CONTROLS_PREFIX = "controls:"
         const val TAG_BATTERY = "battery"
+        const val TAG_FEATURES = "features"
+        const val TAG_HEALTH_STATUS = "healthstatus"
+        const val TAG_HEALTH_READ = "healthread"
+        /** Where `healthlogging` writes by default (CAPTURE_DIR_SENSORS "/health.csv"). */
+        const val DEFAULT_HEALTH_LOG = "/captures/sensors/health.csv"
+        const val HEALTH_READ_WINDOW = 2048
+        /** Last N bytes of the log to pull — a few thousand samples, seconds over BLE. */
+        const val HEALTH_TAIL_BYTES = 32768L
         const val TAG_MEMREPORT = "memreport"
         const val TAG_FSUSAGE = "fsusage"
         const val TAG_PERFTOP = "perftop"
@@ -3476,8 +4113,31 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG_OTA_ARMED = "ota:armed"
         const val TAG_OTA_MONITOR = "ota:monitor"
         const val TAG_OTA_ACK = "ota:ack"
+        const val TAG_OTA_WRITE_BEGIN = "ota:write:begin"
+        const val TAG_OTA_WRITE_BATCH = "ota:write:batch"
+        const val TAG_OTA_WRITE_FINISH = "ota:write:finish"
         const val OTA_STATUS_TIMEOUT_MS = 15_000L
         const val OTA_LONG_STATUS_TIMEOUT_MS = 60_000L
+        const val OTA_BLE_CHECKPOINT_TIMEOUT_MS = 30_000L
+        // Ceiling on frames sent between `otawrite status` checkpoints.
+        //
+        // This trades throughput against pressure on the device's shared command
+        // queue: every frame we send occupies a slot in a six-deep queue whose
+        // enqueue DROPS on full, and the checkpoint command competes for the same
+        // slots. Too small and the round-trip dominates (at 3, measured 2.0 KB/s);
+        // too large and a burst can starve the checkpoint itself (at 32, measured
+        // 8.4 KB/s but the transfer died mid-flight). 16 keeps most of the gain
+        // with half the burst depth, and backs off further under pressure.
+        // 20, against a device command queue of 24. Each burst costs one
+        // `otawrite status` round-trip, so a bigger burst amortises that cost
+        // over more bytes: 16 -> 20 removes 20% of the checkpoints. The cap is
+        // the device's queue depth, which must still hold the checkpoint itself
+        // plus whatever else shares that queue (battery poll, and the web
+        // Bluetooth page's `bleinfo json` when a browser tab is open).
+        const val OTA_BLE_BATCH_CHUNKS = 20
+        const val OTA_BLE_MAX_STALLS = 5 // consecutive no-progress checkpoints before giving up
+        const val OTA_BLE_CHECKPOINT_RETRIES = 4 // a dropped query must not cost the transfer
+        const val OTA_BLE_CHECKPOINT_RETRY_DELAY_MS = 2_000L // let the command queue drain first
         const val OTA_POLL_INTERVAL_MS = 3_000L
         const val OTA_RECONNECT_INTERVAL_MS = 5_000L
         const val OTA_RECONNECT_ATTEMPTS = 36

@@ -10,9 +10,10 @@ ChaCha20-Poly1305) that makes the link confidential **without any BLE pairing/bo
   plus drill-in pages for **device status**, **sensors** (with a live gamepad visualizer),
   **battery**, **on-device LLM chat** (replies streamed token-by-token), and a **file
   browser** (browse / view / upload / manage device files over the encrypted channel).
-- **Closed-loop offline OTA:** choose a signed `.hw1ota` file already on the phone, stage it over
-  encrypted BLE, and let the device's native ESP-IDF recovery updater verify/install it. The app
-  reconnects, observes the firmware health trial, and acknowledges the durable result.
+- **Closed-loop offline OTA:** choose a signed `.hw1ota` file already on the phone, stage it with a
+  checkpointed encrypted binary BLE transfer, and let the device's native ESP-IDF recovery updater
+  verify/install it. The app reconnects, observes the firmware health trial, and acknowledges the
+  durable result.
 - **No Firebase, no Play Services, no analytics, no Nearby/Fast Pair.** Only
   `android.bluetooth.*` plus FOSS libraries (AndroidX, BouncyCastle).
 - **No `INTERNET` permission.** The app cannot talk to the network at all.
@@ -234,7 +235,9 @@ When connected, **Device ▾** opens the device tools:
   complete signed update over the **Secure Channel** with a **superadmin** login. The app does not
   download releases, open external links, join the recovery AP during the normal path, or request
   `INTERNET`/storage permission. HardwareOne re-verifies the manifest, ESP image signature, digest,
-  board/layout, downgrade policy, and power safety; the app then reconnects and monitors probation.
+  board/layout, downgrade policy, and power safety. Transfer uses exact-offset binary frames in
+  three-frame bursts with device checkpoints, per-member size/SHA-256 contracts, and partial cleanup
+  on cancellation; the app then reconnects and monitors probation.
 - **Read status**, **Sync clock**, or **Reconnect** when disconnected.
 
 ---

@@ -68,6 +68,8 @@ dependencies {
     implementation(libs.bouncycastle)
 
     testImplementation(libs.junit)
+    // android.jar's org.json is a stub that throws; unit tests need the real one.
+    testImplementation(libs.json)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation(libs.androidx.compose.ui.tooling.preview)
