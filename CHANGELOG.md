@@ -4,7 +4,10 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com) and this project uses
 [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [2.7.0] — 2026-10-17
+
+HardwareOne can now reach its AI away from Wi-Fi through the phone, over Bluetooth or the phone's
+hotspot, and the app gains device notifications and offline OTA.
 
 ### Added
 - **BLE relay pipe (optional, experimental).** A HardwareOne P4 away from Wi-Fi can reach its
