@@ -49,9 +49,6 @@ fun DevicesScreen(
     onScanClicked: () -> Unit,
     onLogin: () -> Unit,
     nav: HeaderNav,
-    /** One-line Home AI bridge status, shown only while the bridge is running. */
-    bridgeSummary: String? = null,
-    onOpenBridge: (() -> Unit)? = null,
 ) {
     val hw = LocalHwColors.current
     val state by vm.connectionState.collectAsState()
@@ -94,27 +91,6 @@ fun DevicesScreen(
             ) {
                 // Header: switcher (nav hub) + settings.
                 AppHeader(nav)
-
-                // The bridge works without any Bluetooth connection, so its status lives on the
-                // landing page too — otherwise a running listener would be invisible here.
-                if (bridgeSummary != null) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(CardShape)
-                            .background(hw.cardBg)
-                            .border(1.dp, hw.cardBorder, CardShape)
-                            .clickable(enabled = onOpenBridge != null) { onOpenBridge?.invoke() }
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Home AI bridge", color = hw.muted, style = MaterialTheme.typography.labelMedium)
-                            Text(bridgeSummary, color = hw.onGradient, style = MaterialTheme.typography.bodyMedium)
-                        }
-                        Text(text = "›", color = hw.muted, style = MaterialTheme.typography.titleLarge)
-                    }
-                }
 
                 // Only show the connection card once there's actually a device in play —
                 // a fresh launch (idle/disconnected) shows just the action buttons.

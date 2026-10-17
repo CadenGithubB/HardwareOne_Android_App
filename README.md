@@ -14,9 +14,6 @@ ChaCha20-Poly1305) that makes the console link confidential **without any BLE pa
   checkpointed encrypted binary BLE transfer, and let the device's native ESP-IDF recovery updater
   verify/install it. The app reconnects, observes the firmware health trial, and acknowledges the
   durable result.
-- **Optional Home AI bridge:** away from home, the phone's hotspot carries the device's AI
-  requests to the app, which forwards them to your home HTTPS relay through your WireGuard tunnel.
-  Off by default; see [docs/HOME_AI_BRIDGE.md](docs/HOME_AI_BRIDGE.md).
 - **Optional BLE relay pipe (experimental, hardware-tested with a HardwareOne P4):** for a HardwareOne P4, the
   phone acts as a Bluetooth peripheral and carries the device's **end-to-end encrypted** relay
   traffic as opaque bytes through your WireGuard tunnel — the app never sees inside the TLS. No
@@ -25,9 +22,9 @@ ChaCha20-Poly1305) that makes the console link confidential **without any BLE pa
   [docs/BLE_RELAY_PIPE.md](docs/BLE_RELAY_PIPE.md).
 - **No Firebase, no Play Services, no analytics, no Nearby/Fast Pair.** Only
   `android.bluetooth.*` plus FOSS libraries (AndroidX, BouncyCastle).
-- **Network access only for the bridge and the pipe.** The `INTERNET` permission exists solely for
-  the Home AI bridge and the BLE relay pipe; nothing else in the app opens a socket, and each
-  connects only to the one relay destination you configured/approved, only through the VPN.
+- **Network access only for the pipe.** The `INTERNET` permission exists solely for the BLE relay
+  pipe; nothing else in the app opens a socket, and the pipe connects only to the one relay
+  destination you approved, only through the VPN.
 - **Security built in:** optional encrypted channel; login credentials encrypted in the
   hardware **Keystore** behind **biometric/PIN**; encrypted on-device **log storage**;
   `FLAG_SECURE` (screenshots/recording blocked).
@@ -251,20 +248,6 @@ When connected, **Device ▾** opens the device tools:
   on cancellation; the app then reconnects and monitors probation.
 - **Read status**, **Sync clock**, or **Reconnect** when disconnected.
 
-### ⚙ → Home AI bridge (optional, works without a Bluetooth connection)
-
-Away from home, HardwareOne can keep using the AI on your home machine: the device joins the
-phone's hotspot and talks HTTPS to the app, which forwards each request to the home relay through
-the WireGuard tunnel the official WireGuard app provides. The page has explicit **Start/Stop**,
-separate status for the **hotspot listener** and the **home relay**, the exact `llmhttpurl` /
-`llmhttpca` lines to apply on the device, and a **Test relay** probe. It runs as a foreground
-service with a visible notification so it keeps working with the screen locked. One WireGuard
-requirement is not obvious: the tunnel's Allowed IPs must leave the hotspot subnet out (use
-*Exclude private IPs* and add your home prefixes back), otherwise Android routes the phone's
-replies to the device into the tunnel; the page detects and explains that case. Setup, limits,
-error meanings and the on-device validation checklist are in
-[docs/HOME_AI_BRIDGE.md](docs/HOME_AI_BRIDGE.md).
-
 ---
 
 ## 7. Foldable / Pixel Fold support
@@ -292,9 +275,10 @@ The app is foldable-aware (`androidx.window` + Compose `WindowSizeClass`):
 
 ```
 app/src/main/
-├── AndroidManifest.xml          BLE perms (neverForLocation), FLAG_SECURE, bridge + pipe services and their perms
+├── AndroidManifest.xml          BLE perms (neverForLocation), FLAG_SECURE, pipe service and its perms
 ├── java/com/hardwareone/console/
 │   ├── MainActivity.kt          single Activity; permissions, BT-enable, biometric, nav
+│   ├── RemovedFeatureCleanup.kt deletes data left by the removed Home AI bridge on upgrade
 │   ├── ble/
 │   │   ├── BleConstants.kt       UUIDs + limits
 │   │   ├── ConnectionState.kt    connection phases + DeviceInfo / DiscoveredDevice / Capture
@@ -306,17 +290,6 @@ app/src/main/
 │   │   ├── BatteryInfo.kt        `batterystatus json` model
 │   │   ├── LlmModels.kt          LLM status / result / chat-message models
 │   │   └── FileModels.kt         file-browser models (listing/stats/read/write + perms)
-│   ├── bridge/                   Home AI bridge (hotspot HTTPS → VPN → home relay)
-│   │   ├── BridgeConfig.kt       limits mirroring relay.py, the two routes, user config
-│   │   ├── BridgeIdentity.kt     the app's own CA + per-address server certificates (bcpkix)
-│   │   ├── BridgeTls.kt          server/client SSLContexts, explicit SAN check
-│   │   ├── HttpHead.kt           bounded HTTP/1.1 head parser
-│   │   ├── RelayClient.kt        pinned TLS to the relay, one request, probe; never retries
-│   │   ├── BridgeServer.kt       hotspot listener: admit, forward, stream, deadlines
-│   │   ├── BridgeNetworks.kt     hotspot interface detection, VPN network tracking/binding
-│   │   ├── BridgeStore.kt        prefs + Keystore-encrypted CA key
-│   │   ├── HomeBridge.kt         process-wide status + start/stop/probe
-│   │   └── HomeBridgeService.kt  foreground service + runtime (rebinding, wake lock, notification)
 │   ├── pipe/                     BLE relay pipe (P4 → BLE → opaque TCP → VPN → relay; TLS end to end)
 │   │   ├── PipeWire.kt           v1 UUIDs, opcodes, errors, limits (V/P), little-endian helpers, byte ring
 │   │   ├── PipeSecureChannel.kt  HW1-PIPE-v1 initiator (X25519/HKDF/ChaCha20-Poly1305, unsigned counters)
@@ -325,6 +298,7 @@ app/src/main/
 │   │   ├── PipeTarget.kt         OPEN destinations; canonical URL → target matching the firmware
 │   │   ├── PipeEngine.kt         one session: handshake, one notification outstanding, teardown, stream sockets
 │   │   ├── PipeNetwork.kt        VPN-network DNS + one bound TCP connect
+│   │   ├── VpnNetworkTracker.kt  the WireGuard VPN network: availability, DNS servers, routes
 │   │   ├── PipeGattServer.kt     GATT server instances, CCCD admission, advertising, retirement
 │   │   ├── PipeAttPolicy.kt      ATT request decision table (no bonding, plain permissions)
 │   │   ├── PipeCooldown.kt       global 30 s authentication cooldown
@@ -348,8 +322,7 @@ app/src/main/
 │       ├── SensorActions.kt      per-sensor documented-action registry
 │       ├── LlmChatScreen.kt      on-device LLM chat (streamed replies, load/stop/retry/clear)
 │       ├── FilesScreen.kt        BLE file browser (browse/view/upload/manage + picker)
-│       ├── SettingsScreen.kt     appearance · bridge/pipe entries · credentials · logs · secure channel
-│       ├── HomeBridgeScreen.kt   Home AI bridge: start/stop, status, device settings, relay config
+│       ├── SettingsScreen.kt     appearance · pipe entry · credentials · logs · secure channel
 │       ├── PhonePipeScreen.kt    BLE relay pipe: start/stop, passphrase + destination, background, diagnostics
 │       ├── SavedLogsScreen.kt    encrypted saved-log list (+ storage info)
 │       ├── LogViewerScreen.kt    decrypted viewer + plaintext export
@@ -358,9 +331,7 @@ app/src/main/
 │       └── theme/Theme.kt        light/dark "glassmorphism" Material3 theme
 ├── res/  (+ res/values-night/)  adaptive icon, strings, day/night window themes
 └── test/ …/security/            SecureChannel unit tests + interop vectors
-    …/bridge/                     bridge end-to-end tests (fake ESP32 ↔ bridge ↔ fake relay over real TLS)
     …/pipe/                       pipe wire/stream/flow, exhaustion, engine + routes, targets (stage-4 rebuild pending)
-docs/HOME_AI_BRIDGE.md            Home AI bridge design, setup, status reference, validation
 docs/BLE_RELAY_PIPE.md            BLE relay pipe (stage 4): contract, setup, recovery, qualification checklist
 docs/SECURE_CHANNEL_V1.md         the secure-channel wire contract (app ↔ firmware)
 docs/DEVICE_STATUS.md             status-page data contract
@@ -387,15 +358,9 @@ docs/SENSORS_DESIGN.md            sensors-page design + per-sensor actions
   app-private storage. Plaintext only leaves via an explicit **Export**.
 - **`FLAG_SECURE`** (always on, not user-toggleable): blocks screenshots, screen recording,
   screen-share, and the recents preview.
-- **Network:** the `INTERNET` permission is used only by the optional Home AI bridge and the
-  optional BLE relay pipe. The bridge accepts HTTPS from the device on the hotspot and forwards
-  exactly two POST routes to the relay
-  you configured, over the VPN network only, with TLS pinned to the relay's CA on one side and the
-  app's own CA on the other. It never falls back to cellular, follows no redirects, stores no
-  device token, and logs no prompt text. Off by default. See
-  [docs/HOME_AI_BRIDGE.md](docs/HOME_AI_BRIDGE.md). The pipe uses it only to open one TCP socket
-  per device stream to the single approved destination, bound to the VPN
-  network; it forwards opaque TLS bytes and cannot read them. See
+- **Network:** the `INTERNET` permission is used only by the optional BLE relay pipe, to open one
+  TCP socket per device stream to the single approved destination, bound to the VPN network; it
+  never falls back to cellular, forwards opaque TLS bytes and cannot read them. Off by default. See
   [docs/BLE_RELAY_PIPE.md](docs/BLE_RELAY_PIPE.md).
 - `allowBackup="false"`; no third-party analytics/SDKs (only FOSS AndroidX + BouncyCastle). What
   you build is what runs.

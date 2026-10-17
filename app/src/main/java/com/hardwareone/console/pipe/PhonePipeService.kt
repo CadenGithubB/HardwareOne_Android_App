@@ -27,7 +27,6 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.hardwareone.console.MainActivity
 import com.hardwareone.console.R
-import com.hardwareone.console.bridge.VpnNetworkTracker
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -196,7 +195,7 @@ class PhonePipeService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return NotificationCompat.Builder(this, CHANNEL)
-            .setSmallIcon(R.drawable.ic_bridge)
+            .setSmallIcon(R.drawable.ic_pipe)
             .setContentTitle("BLE relay pipe")
             .setContentText(text)
             .setOngoing(true)
@@ -242,7 +241,7 @@ class PhonePipeService : Service() {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
             val n = NotificationCompat.Builder(context, CHANNEL)
-                .setSmallIcon(R.drawable.ic_bridge)
+                .setSmallIcon(R.drawable.ic_pipe)
                 .setContentTitle("BLE relay pipe paused")
                 .setContentText("Android stopped it in the background. Tap to resume.")
                 .setContentIntent(resume)

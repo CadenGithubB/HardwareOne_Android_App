@@ -1,6 +1,5 @@
 package com.hardwareone.console.pipe
 
-import com.hardwareone.console.bridge.VpnNetworkTracker
 import java.io.IOException
 import java.net.Inet6Address
 import java.net.InetAddress

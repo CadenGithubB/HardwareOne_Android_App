@@ -35,18 +35,17 @@
         android:maxSdkVersion="30" />
 
     <!--
-        Home AI bridge and BLE relay pipe (optional features, off by default). These are the only
-        network-related permissions in the app. The bridge accepts HTTPS from the ESP32 on the
-        phone's hotspot and forwards it to the configured home relay; the pipe forwards a P4's
-        opaque TLS bytes from Bluetooth to the one approved relay destination. Both go only through
-        the user's WireGuard tunnel. Nothing else in the app opens a socket.
+        BLE relay pipe (optional, off by default). These are the only network-related permissions
+        in the app. The pipe forwards a P4's opaque TLS bytes from Bluetooth to the one approved
+        relay destination, only through the user's WireGuard tunnel. Nothing else in the app opens
+        a socket.
 
         - INTERNET / ACCESS_NETWORK_STATE: sockets, and finding the VPN network to bind them to.
         - CHANGE_NETWORK_STATE: a normal (auto-granted) permission that Android 14+ accepts as the
           prerequisite for a connectedDevice foreground service; the app never changes network state.
         - FOREGROUND_SERVICE(_CONNECTED_DEVICE), POST_NOTIFICATIONS: the visible, ongoing
-          notification that keeps the bridge / pipe alive while the screen is locked.
-        - WAKE_LOCK: held only while a request/stream is being forwarded, with a hard timeout.
+          notification that keeps the pipe alive while the screen is locked.
+        - WAKE_LOCK: held only while a stream is being forwarded, with a hard timeout.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -89,16 +88,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!--
-            Home AI bridge: foreground service that accepts the ESP32's HTTPS requests on the
-            hotspot and forwards them to the home relay over the VPN. Started/stopped only by
-            the app's own UI (not exported).
-        -->
-        <service
-            android:name=".bridge.HomeBridgeService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
 
         <!--
             BLE relay pipe: foreground service that serves HardwareOne as a GATT server (HW1-PIPE-v1

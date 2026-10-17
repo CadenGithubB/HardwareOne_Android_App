@@ -62,8 +62,6 @@ private val CardShape = RoundedCornerShape(14.dp)
 
 @Composable
 fun SettingsScreen(
-    bridgeSummary: String,
-    onOpenHomeBridge: () -> Unit,
     pipeSummary: String,
     onOpenPipe: () -> Unit,
     themePref: ThemePreference,
@@ -158,8 +156,6 @@ fun SettingsScreen(
                             onThemeChange(ThemePreference.DARK)
                         }
                     }
-
-                    HomeBridgeCard(summary = bridgeSummary, onOpen = onOpenHomeBridge)
 
                     EntryCard(
                         title = "BLE relay pipe",
@@ -410,15 +406,6 @@ private fun SecureChannelSection(
         }
     }
 }
-
-/** Entry point for the optional Home AI bridge; the page itself holds the controls and status. */
-@Composable
-private fun HomeBridgeCard(summary: String, onOpen: () -> Unit) = EntryCard(
-    title = "Home AI bridge",
-    summary = summary,
-    description = "Forward the device's AI requests from the phone hotspot to the home relay over WireGuard.",
-    onOpen = onOpen,
-)
 
 /** A tappable card that opens an optional feature's own page. */
 @Composable

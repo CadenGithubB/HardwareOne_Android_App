@@ -31,10 +31,9 @@ P4 HTTP → P4 TLS → pipe frames → HW1-PIPE-v1 over BLE → this app (GATT s
   port forwarding, no VPN on the P4.
 - Path selection (Wi-Fi first, one pre-HTTP fallback) is the P4's job. The app serves streams; it
   never picks routes, reconnects a failed socket or replays bytes.
-- This is a separate feature from the Home AI bridge (`docs/HOME_AI_BRIDGE.md`), which does
-  terminate TLS on the phone. The two can coexist; neither depends on the other. It is also
-  separate from the console link and its Secure Channel v1: the pipe shares no code, key or bond
-  with it.
+- The pipe is separate from the console link and its Secure Channel v1: it shares no code, key or
+  bond with it. (It replaces the hotspot-based Home AI bridge, which terminated TLS on the phone and
+  was removed in 2.7.1.)
 
 Code: `app/src/main/java/com/hardwareone/console/pipe/`, screen `ui/PhonePipeScreen.kt`.
 
@@ -77,8 +76,7 @@ writer threads, which block only on their own socket.
   IP-literal URL needs no DNS.
 - *Always-on VPN* is recommended so the tunnel comes back by itself. *Block connections without
   VPN* (lockdown) is optional: the pipe fails closed on its own (VPN-bound DNS and sockets, route
-  checks, stream teardown on loss). The Home AI bridge needs lockdown **off**
-  (`docs/HOME_AI_BRIDGE.md`); if you use both features, leave it off.
+  checks, stream teardown on loss).
 - One-time recovery setup (see "Lifecycle and recovery"): battery **Unrestricted**, GrapheneOS
   Bluetooth timeout left **off** (the default).
 

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Notification small icon for the Home AI bridge (Material "link" glyph, monochrome). -->
+<!-- Notification small icon for the BLE relay pipe (Material "link" glyph, monochrome). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
