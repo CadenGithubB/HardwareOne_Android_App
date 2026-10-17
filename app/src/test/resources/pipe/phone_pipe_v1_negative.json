@@ -1,0 +1,1870 @@
+{
+  "description": "HW1-PIPE-v1 X2: negative and boundary vectors with the P4 outcome. Same synthetic keys as phone_pipe_v1_sessions.json.",
+  "generated_by": "components/hardwareone/test/host/phone_session_vectors.cpp: production BLE_PhoneGatt.cpp, BLE_PhoneSecureChannel.h and BLE_PhonePipeCore.h on the synthetic SDK in phone_gatt_fake_sdk.h; only the device key, secure nonce and pipe HELLO nonce are fixed",
+  "base": {
+    "handshake": "Frames start at the P4 CCCD write of a fresh MTU-247 session (t_ms 0).",
+    "pipe": "Frames continue the MTU-247 session of phone_pipe_v1_sessions.json after the phone pipe HELLO_ACK: phone outer counter 1 and inner sequence 0 are used, P4 counter 1 and inner sequence 0 are used. Unless a vector says otherwise, phone frames use the next counter/seq.",
+    "transport": "No authenticated state; the adapter stops before the CCCD write."
+  },
+  "fields": {
+    "source": "p4_production = outcome decided by the production P4 adapter; contract = P4-produced bytes that Android must reject under the agreed rule named in \"rule\"",
+    "p4_sends_hex": "values the P4 wrote after the first vector frame (REJECT, replies)",
+    "auth_cooldown": "the P4 charges its global 30 s authentication cooldown",
+    "p4_error": "the adapter session end reason: for an authenticated frame the pipe refuses, the core's own cause (a phone RESET's code, Flow, Protocol); Unauthorized only for frames that fail authentication"
+  },
+  "vectors": [
+    {
+      "id": "wrong_passphrase",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "CONFIRM sealed with keys from a different passphrase",
+      "expected": "REJECT, teardown, cooldown",
+      "p4_sends_hex": [
+        "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+        "0502"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "018f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f000102030405060708090a0b0c0d0e0f",
+          "note": "phone public key and nonce"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_hello_ack",
+          "value_hex": "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+          "note": "device public key and nonce"
+        },
+        {
+          "i": 3,
+          "t_ms": 92,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_confirm",
+          "value_hex": "03ce4372545fba3280e82e9c8d611260f9a221",
+          "note": "sealed with keys from WrongPipe!456"
+        },
+        {
+          "i": 4,
+          "t_ms": 103,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_reject",
+          "value_hex": "0502",
+          "note": "REJECT reason 2, handshake failure"
+        }
+      ]
+    },
+    {
+      "id": "console_domain",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "CONFIRM from the console channel derivation (PBKDF2 salt and HKDF info HW1-SC-v1)",
+      "expected": "REJECT, teardown, cooldown",
+      "p4_sends_hex": [
+        "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+        "0502"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "018f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f000102030405060708090a0b0c0d0e0f",
+          "note": "phone public key and nonce"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_hello_ack",
+          "value_hex": "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+          "note": "device public key and nonce"
+        },
+        {
+          "i": 3,
+          "t_ms": 92,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_confirm",
+          "value_hex": "038f3479e19c2f619a3e6632a26843e043784e",
+          "note": "console-domain keys"
+        },
+        {
+          "i": 4,
+          "t_ms": 103,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_reject",
+          "value_hex": "0502",
+          "note": "REJECT reason 2, handshake failure"
+        }
+      ]
+    },
+    {
+      "id": "tampered_confirm",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "valid CONFIRM with the last tag bit flipped",
+      "expected": "REJECT, teardown, cooldown",
+      "p4_sends_hex": [
+        "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+        "0502"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "018f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f000102030405060708090a0b0c0d0e0f",
+          "note": "phone public key and nonce"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_hello_ack",
+          "value_hex": "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+          "note": "device public key and nonce"
+        },
+        {
+          "i": 3,
+          "t_ms": 92,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_confirm",
+          "value_hex": "03ef56e7f2db705003c3feb17c8e44ca3b3cc1",
+          "note": "tag bit flipped"
+        },
+        {
+          "i": 4,
+          "t_ms": 103,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_reject",
+          "value_hex": "0502",
+          "note": "REJECT reason 2, handshake failure"
+        }
+      ]
+    },
+    {
+      "id": "zero_public_key",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "HELLO with an all-zero X25519 public key",
+      "expected": "REJECT, teardown, cooldown",
+      "p4_sends_hex": [
+        "0502"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "010000000000000000000000000000000000000000000000000000000000000000000102030405060708090a0b0c0d0e0f",
+          "note": "all-zero public key"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_reject",
+          "value_hex": "0502",
+          "note": "REJECT reason 2, handshake failure"
+        }
+      ]
+    },
+    {
+      "id": "low_order_public_key",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "HELLO with an order-8 X25519 point (shared secret all zero)",
+      "expected": "REJECT, teardown, cooldown",
+      "p4_sends_hex": [
+        "0502"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "01e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800000102030405060708090a0b0c0d0e0f",
+          "note": "order-8 public key"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_reject",
+          "value_hex": "0502",
+          "note": "REJECT reason 2, handshake failure"
+        }
+      ]
+    },
+    {
+      "id": "phone_sends_reject",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "REJECT 05 02 from the phone instead of HELLO (unsupported initiator message)",
+      "expected": "REJECT, teardown, cooldown",
+      "p4_sends_hex": [
+        "0502"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_reject",
+          "value_hex": "0502",
+          "note": "phone-origin REJECT"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_reject",
+          "value_hex": "0502",
+          "note": "REJECT reason 2, handshake failure"
+        }
+      ]
+    },
+    {
+      "id": "short_hello",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "48-byte HELLO",
+      "expected": "REJECT, teardown, cooldown",
+      "p4_sends_hex": [
+        "0502"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "018f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f000102030405060708090a0b0c0d0e",
+          "note": "one byte short"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_reject",
+          "value_hex": "0502",
+          "note": "REJECT reason 2, handshake failure"
+        }
+      ]
+    },
+    {
+      "id": "data_before_confirm",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "an outer DATA value before the handshake completes",
+      "expected": "REJECT, teardown, cooldown",
+      "p4_sends_hex": [
+        "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+        "0502"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "018f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f000102030405060708090a0b0c0d0e0f",
+          "note": "phone public key and nonce"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_hello_ack",
+          "value_hex": "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+          "note": "device public key and nonce"
+        },
+        {
+          "i": 3,
+          "t_ms": 92,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000010000000000000000000000000000000000000000000000000000000000000000",
+          "note": "DATA during the handshake"
+        },
+        {
+          "i": 4,
+          "t_ms": 103,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_reject",
+          "value_hex": "0502",
+          "note": "REJECT reason 2, handshake failure"
+        }
+      ]
+    },
+    {
+      "id": "peer_silent_after_hello_ack",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "no CONFIRM; the 5 s secure deadline from the CCCD write expires",
+      "expected": "teardown, cooldown, no REJECT",
+      "p4_sends_hex": [
+        "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "018f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f000102030405060708090a0b0c0d0e0f",
+          "note": "phone public key and nonce"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_hello_ack",
+          "value_hex": "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+          "note": "device public key and nonce"
+        }
+      ]
+    },
+    {
+      "id": "secure_expiry_local_stall",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "the P4 cannot submit its HELLO_ACK (TX gate busy) until the 5 s cap",
+      "expected": "teardown, no cooldown (A-5: the P4 owed the next step)",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Deadline",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "018f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f000102030405060708090a0b0c0d0e0f",
+          "note": "phone public key and nonce"
+        }
+      ]
+    },
+    {
+      "id": "hello_ack_completion_timeout",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "HELLO_ACK submitted but its local write never completes (2 s bound)",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [
+        "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Deadline",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "018f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f000102030405060708090a0b0c0d0e0f",
+          "note": "phone public key and nonce"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_hello_ack",
+          "value_hex": "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+          "note": "device public key and nonce"
+        }
+      ]
+    },
+    {
+      "id": "disconnect_during_handshake",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "link drops after HELLO_ACK",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [
+        "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Connect",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x00 and sends HELLO at once"
+        },
+        {
+          "i": 1,
+          "t_ms": 1,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "018f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f000102030405060708090a0b0c0d0e0f",
+          "note": "phone public key and nonce"
+        },
+        {
+          "i": 2,
+          "t_ms": 32,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_hello_ack",
+          "value_hex": "02358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254101112131415161718191a1b1c1d1e1f",
+          "note": "device public key and nonce"
+        }
+      ]
+    },
+    {
+      "id": "mtu_63",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "transport",
+      "att_mtu": 63,
+      "description": "negotiated MTU 63 is below the 64 minimum",
+      "expected": "no CCCD write, teardown, no cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Connect",
+      "frames": []
+    },
+    {
+      "id": "cccd_refused_0x11",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "transport",
+      "att_mtu": 247,
+      "description": "the CCCD write request completes with 0x11 (second device, cooldown or blocked engine)",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Protocol",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 0,
+          "dir": "p4_to_phone",
+          "att": "write_request",
+          "kind": "cccd_enable",
+          "value_hex": "0100",
+          "note": "TX CCCD 01 00; Android answers 0x11"
+        }
+      ]
+    },
+    {
+      "id": "counter_gap_allowed",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "outer counters 7 then 9 (gaps allowed); inner sequences 1, 2",
+      "expected": "both accepted; P4 answers each PING",
+      "p4_sends_hex": [
+        "1000000000000000027b8a584661596cd7bda9c8ff07d0421831eb683b22b4e87f68a70469388635de",
+        "100000000000000003b68f12966342281b5d002a10d173046e286e8a113e3b1ac6a0b5c75586aa0e4d"
+      ],
+      "session_continues": true,
+      "p4_phase": "pipe",
+      "auth_cooldown": false,
+      "p4_error": "None",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000072c759d5f78b7e231cd26d093c6065a300ac385bcef8fed4aa67d7ffce4e36972",
+          "note": "PING cookie 09080706",
+          "counter": 7,
+          "inner_hex": "01300000010000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 1,
+          "t_ms": 215,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027b8a584661596cd7bda9c8ff07d0421831eb683b22b4e87f68a70469388635de",
+          "note": "PONG cookie 09080706",
+          "counter": 2,
+          "inner_hex": "01310000010000000400030009080706",
+          "op": "PONG",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 2,
+          "t_ms": 275,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000098a120e5c0851503bc1c35515665d9c87de18915ef9568ccb6124538fcac7054f",
+          "note": "PING cookie 09080706",
+          "counter": 9,
+          "inner_hex": "01300000020000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 2,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 3,
+          "t_ms": 276,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "100000000000000003b68f12966342281b5d002a10d173046e286e8a113e3b1ac6a0b5c75586aa0e4d",
+          "note": "PONG cookie 09080706",
+          "counter": 3,
+          "inner_hex": "01310000020000000400030009080706",
+          "op": "PONG",
+          "stream": 0,
+          "seq": 2,
+          "flags": 3,
+          "body_hex": "09080706"
+        }
+      ]
+    },
+    {
+      "id": "counter_regression_after_gap",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "counters 7, 9, then 8",
+      "expected": "teardown, cooldown",
+      "p4_sends_hex": [
+        "1000000000000000027b8a584661596cd7bda9c8ff07d0421831eb683b22b4e87f68a70469388635de",
+        "100000000000000003b68f12966342281b5d002a10d173046e286e8a113e3b1ac6a0b5c75586aa0e4d"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000072c759d5f78b7e231cd26d093c6065a300ac385bcef8fed4aa67d7ffce4e36972",
+          "note": "PING cookie 09080706",
+          "counter": 7,
+          "inner_hex": "01300000010000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 1,
+          "t_ms": 215,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027b8a584661596cd7bda9c8ff07d0421831eb683b22b4e87f68a70469388635de",
+          "note": "PONG cookie 09080706",
+          "counter": 2,
+          "inner_hex": "01310000010000000400030009080706",
+          "op": "PONG",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 2,
+          "t_ms": 275,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000098a120e5c0851503bc1c35515665d9c87de18915ef9568ccb6124538fcac7054f",
+          "note": "PING cookie 09080706",
+          "counter": 9,
+          "inner_hex": "01300000020000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 2,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 3,
+          "t_ms": 276,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "100000000000000003b68f12966342281b5d002a10d173046e286e8a113e3b1ac6a0b5c75586aa0e4d",
+          "note": "PONG cookie 09080706",
+          "counter": 3,
+          "inner_hex": "01310000020000000400030009080706",
+          "op": "PONG",
+          "stream": 0,
+          "seq": 2,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 4,
+          "t_ms": 336,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000086c247ee14bd532e24b7d0a12c4f8938aff146191b1d610a035031d95f151aa23",
+          "note": "PING cookie 09080706",
+          "counter": 8,
+          "inner_hex": "01300000030000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 3,
+          "flags": 3,
+          "body_hex": "09080706"
+        }
+      ]
+    },
+    {
+      "id": "replayed_counter",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "the same accepted DATA value delivered twice",
+      "expected": "teardown, cooldown",
+      "p4_sends_hex": [
+        "1000000000000000027b8a584661596cd7bda9c8ff07d0421831eb683b22b4e87f68a70469388635de"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a1a739b49a11f99665e8cd2b9a4c9dca4d3c35524eab344ee55de4f7daa9384",
+          "note": "PING cookie 09080706",
+          "counter": 2,
+          "inner_hex": "01300000010000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 1,
+          "t_ms": 215,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027b8a584661596cd7bda9c8ff07d0421831eb683b22b4e87f68a70469388635de",
+          "note": "PONG cookie 09080706",
+          "counter": 2,
+          "inner_hex": "01310000010000000400030009080706",
+          "op": "PONG",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 2,
+          "t_ms": 275,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a1a739b49a11f99665e8cd2b9a4c9dca4d3c35524eab344ee55de4f7daa9384",
+          "note": "replay of the previous value"
+        }
+      ]
+    },
+    {
+      "id": "counter_2_pow_63",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "outer counter 2^63",
+      "expected": "accepted",
+      "p4_sends_hex": [
+        "1000000000000000027b8a584661596cd7bda9c8ff07d0421831eb683b22b4e87f68a70469388635de"
+      ],
+      "session_continues": true,
+      "p4_phase": "pipe",
+      "auth_cooldown": false,
+      "p4_error": "None",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1080000000000000007639829e1bda36c665f755332a03fc8fb1e8d74225b494b68e8f66d28e58db89",
+          "note": "PING cookie 09080706",
+          "counter": 9223372036854775808,
+          "inner_hex": "01300000010000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 1,
+          "t_ms": 215,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027b8a584661596cd7bda9c8ff07d0421831eb683b22b4e87f68a70469388635de",
+          "note": "PONG cookie 09080706",
+          "counter": 2,
+          "inner_hex": "01310000010000000400030009080706",
+          "op": "PONG",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        }
+      ]
+    },
+    {
+      "id": "counter_max_once",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "outer counter 2^64-1 accepted once; the next value cannot exceed it",
+      "expected": "first accepted, second: teardown, cooldown",
+      "p4_sends_hex": [
+        "1000000000000000027b8a584661596cd7bda9c8ff07d0421831eb683b22b4e87f68a70469388635de"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "10ffffffffffffffff2ed24e9cc11be2241138972e122b832d14443a646e0ed49d199bf75d38cdd54a",
+          "note": "PING cookie 09080706",
+          "counter": 18446744073709551615,
+          "inner_hex": "01300000010000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 1,
+          "t_ms": 215,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027b8a584661596cd7bda9c8ff07d0421831eb683b22b4e87f68a70469388635de",
+          "note": "PONG cookie 09080706",
+          "counter": 2,
+          "inner_hex": "01310000010000000400030009080706",
+          "op": "PONG",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        },
+        {
+          "i": 2,
+          "t_ms": 275,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "10ffffffffffffffff2ed24e9cc21be2241138972e122b832db3e39fbc25f1e688480316c42eead58c",
+          "note": "PING cookie 09080706",
+          "counter": 18446744073709551615,
+          "inner_hex": "01300000020000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 2,
+          "flags": 3,
+          "body_hex": "09080706"
+        }
+      ]
+    },
+    {
+      "id": "tampered_data_tag",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "DATA with the last tag bit flipped",
+      "expected": "teardown, cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a1a739b49a11f99665e8cd2b9a4c9dca4d3c35524eab344ee55de4f7daa9385",
+          "note": "tag bit flipped"
+        }
+      ]
+    },
+    {
+      "id": "plaintext_after_handshake",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "an unencrypted inner frame after the handshake",
+      "expected": "teardown, cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "plaintext_inner",
+          "value_hex": "01300000010000000400030009080706",
+          "note": "inner PING without the secure layer"
+        }
+      ]
+    },
+    {
+      "id": "secure_hello_after_ready",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "a secure HELLO after the pipe is READY",
+      "expected": "teardown, cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "secure_hello",
+          "value_hex": "018f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f000102030405060708090a0b0c0d0e0f",
+          "note": "HELLO again"
+        }
+      ]
+    },
+    {
+      "id": "truncated_data",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "a 24-byte DATA value (shorter than the 25-byte overhead)",
+      "expected": "teardown, cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": true,
+      "p4_error": "Unauthorized",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a1a739b49a11f99665e8cd2b9a4c9",
+          "note": "truncated"
+        }
+      ]
+    },
+    {
+      "id": "oversize_value",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "a 245-byte notification at MTU 247 (V = 244)",
+      "expected": "teardown, no cooldown (refused before decryption)",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Protocol",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a0a729b49a11f99b25e8fd2f2ee8c98e397032397b0058704cc075b5eda82987c00ea6d061369faac4f949eee86ce181a26ffaea91339941dba85e5d75f4734f252334716d2a9a13d79e79d95e3fb67b47e51513602f656d0d6250c1ab530ad4bf6c23143d7bb4db3b5d8de87c204391023469037a308e983e3642804c68b976700c2711f366db2f2b8b0d4ff6776b65617dea3320e465704e8c5d094ab43d109302fc1689faef06b0f65d62c402d37f00cf39e9942fd6d805de223d5f503ff68f98b52cbcff719e7076114a4dc85913b0ae29bf22d7c6384c8058a5f568399f0574d451600034557a4ab22",
+          "note": "one byte over V"
+        }
+      ]
+    },
+    {
+      "id": "inner_sequence_gap",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "authenticated PING with inner sequence 2 where 1 is due",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Protocol",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a1a739b4aa11f99665e8cd2b9a4c9dcbe4d049831c75f436a41e377bf88b4ef",
+          "note": "PING cookie 09080706",
+          "counter": 2,
+          "inner_hex": "01300000020000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 2,
+          "flags": 3,
+          "body_hex": "09080706"
+        }
+      ]
+    },
+    {
+      "id": "inner_version_2",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "authenticated inner frame with version byte 2",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Protocol",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "100000000000000002991a739b49a11f99665e8cd2b9a4c9dc99f61757a8feae1cac77bde436aff9b5",
+          "note": "PING cookie 09080706",
+          "counter": 2,
+          "inner_hex": "02300000010000000400030009080706",
+          "op": "PING",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "09080706"
+        }
+      ]
+    },
+    {
+      "id": "frame_for_future_stream",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "CREDIT for stream 5 above the OPEN high-water mark",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Protocol",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a0b769b49a11f99665e8cd2b0bcceda324c2336560cef29bc2e39e7a50e1ad0",
+          "note": "CREDIT limit 4096",
+          "counter": 2,
+          "inner_hex": "01210500010000000400030000100000",
+          "op": "CREDIT",
+          "stream": 5,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00100000"
+        }
+      ]
+    },
+    {
+      "id": "phone_reset_stream_0",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "encrypted RESET on stream 0, code 13",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Deadline",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a0f739b49a11f99605e8cd2bdacec373c6eff77479dc21acc784517ce4b",
+          "note": "RESET code 13",
+          "counter": 2,
+          "inner_hex": "0125000001000000020003000d00",
+          "op": "RESET",
+          "stream": 0,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "0d00"
+        }
+      ]
+    },
+    {
+      "id": "open_ok_window_4097",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "OPEN_OK granting 4097 (maximum is 4096)",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [
+        "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Protocol",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 244,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352",
+          "note": "OPEN window 1024 port 443 address type 1",
+          "counter": 2,
+          "inner_hex": "01100100010000000c00030000040000bb010104c000020a",
+          "op": "OPEN",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00040000bb010104c000020a"
+        },
+        {
+          "i": 1,
+          "t_ms": 304,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a3b729b49a11f99665e8cd2b1bccedafbe566ad39670f6e41701dda4573c9c0",
+          "note": "OPEN_OK receive_limit 4097",
+          "counter": 2,
+          "inner_hex": "01110100010000000400030001100000",
+          "op": "OPEN_OK",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "01100000"
+        }
+      ]
+    },
+    {
+      "id": "open_ok_window_4096",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "OPEN_OK granting the maximum 4096",
+      "expected": "accepted",
+      "p4_sends_hex": [
+        "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352"
+      ],
+      "session_continues": true,
+      "p4_phase": "pipe",
+      "auth_cooldown": false,
+      "p4_error": "None",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 244,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352",
+          "note": "OPEN window 1024 port 443 address type 1",
+          "counter": 2,
+          "inner_hex": "01100100010000000c00030000040000bb010104c000020a",
+          "op": "OPEN",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00040000bb010104c000020a"
+        },
+        {
+          "i": 1,
+          "t_ms": 304,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a3b729b49a11f99665e8cd2b0bccedaa0bf60fb6651266829f6dc9738961dc2",
+          "note": "OPEN_OK receive_limit 4096",
+          "counter": 2,
+          "inner_hex": "01110100010000000400030000100000",
+          "op": "OPEN_OK",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00100000"
+        }
+      ]
+    },
+    {
+      "id": "credit_beyond_sent_plus_4096",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "after OPEN_OK 1024 and no P4 DATA, CREDIT 4097",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [
+        "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Flow",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 244,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352",
+          "note": "OPEN window 1024 port 443 address type 1",
+          "counter": 2,
+          "inner_hex": "01100100010000000c00030000040000bb010104c000020a",
+          "op": "OPEN",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00040000bb010104c000020a"
+        },
+        {
+          "i": 1,
+          "t_ms": 304,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a3b729b49a11f99665e8cd2b0a8cedabea361807edb7132b315538e0b8dd854",
+          "note": "OPEN_OK receive_limit 1024",
+          "counter": 2,
+          "inner_hex": "01110100010000000400030000040000",
+          "op": "OPEN_OK",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00040000"
+        },
+        {
+          "i": 2,
+          "t_ms": 335,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "100000000000000003c65f9003590b32258f4a175e5d538a32925e5730110bc8eef508fe4d36c74d51",
+          "note": "CREDIT limit 4097",
+          "counter": 3,
+          "inner_hex": "01210100020000000400030001100000",
+          "op": "CREDIT",
+          "stream": 1,
+          "seq": 2,
+          "flags": 3,
+          "body_hex": "01100000"
+        }
+      ]
+    },
+    {
+      "id": "credit_repeat_tolerated",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "CREDIT equal to the current limit",
+      "expected": "accepted",
+      "p4_sends_hex": [
+        "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352"
+      ],
+      "session_continues": true,
+      "p4_phase": "pipe",
+      "auth_cooldown": false,
+      "p4_error": "None",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 244,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352",
+          "note": "OPEN window 1024 port 443 address type 1",
+          "counter": 2,
+          "inner_hex": "01100100010000000c00030000040000bb010104c000020a",
+          "op": "OPEN",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00040000bb010104c000020a"
+        },
+        {
+          "i": 1,
+          "t_ms": 304,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a3b729b49a11f99665e8cd2b0a8cedabea361807edb7132b315538e0b8dd854",
+          "note": "OPEN_OK receive_limit 1024",
+          "counter": 2,
+          "inner_hex": "01110100010000000400030000040000",
+          "op": "OPEN_OK",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00040000"
+        },
+        {
+          "i": 2,
+          "t_ms": 335,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "100000000000000003c65f9003590b32258f4a175e5c478a322bf4dda5235a65ebc073af832fd684c0",
+          "note": "CREDIT limit 1024",
+          "counter": 3,
+          "inner_hex": "01210100020000000400030000040000",
+          "op": "CREDIT",
+          "stream": 1,
+          "seq": 2,
+          "flags": 3,
+          "body_hex": "00040000"
+        }
+      ]
+    },
+    {
+      "id": "receive_window_overflow",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "1025 DATA bytes against the P4's 1024-byte grant",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [
+        "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352"
+      ],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Flow",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 244,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352",
+          "note": "OPEN window 1024 port 443 address type 1",
+          "counter": 2,
+          "inner_hex": "01100100010000000c00030000040000bb010104c000020a",
+          "op": "OPEN",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00040000bb010104c000020a"
+        },
+        {
+          "i": 1,
+          "t_ms": 304,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a3b729b49a11f99665e8cd2b0a8cedabea361807edb7132b315538e0b8dd854",
+          "note": "OPEN_OK receive_limit 1024",
+          "counter": 2,
+          "inner_hex": "01110100010000000400030000040000",
+          "op": "OPEN_OK",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00040000"
+        },
+        {
+          "i": 2,
+          "t_ms": 335,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "100000000000000003c65e9003590b3225444a145e3d2be544c5201f706a65c4615290dba66fe13d9959ca56fcc9730b9f2d20cd3c50f2cad13afa2c2dca3668ff4ecfb61a7551f9c49618dd98fb020f2ce6c337ba319dbc7d40714505f3ae7621f0519e876d91c37ec4f940c6ddec04a3c014bffa01783485fac353b60b0c179a75b1d2a201efe1181066677522ed0e55f65efd48b3b53bd6528d43ea3e4cbb7e3ad6468e4eb857e5f139eb24be60971aa5fea90811c8be4507edc565f2d649aed12f513b84f8e8bb293b028430fb1729e135e444ad19a63f4c6e05f2c7e30433f653c9050ce389cf97cfc607859c376b7d0f52",
+          "note": "DATA 207 bytes",
+          "counter": 3,
+          "inner_hex": "0120010002000000cf00000061686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc03",
+          "op": "DATA",
+          "stream": 1,
+          "seq": 2,
+          "flags": 0,
+          "body_hex": "61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc03"
+        },
+        {
+          "i": 3,
+          "t_ms": 336,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "100000000000000004838dd76ff39ff1bff7a4a982badd072ab09cf7a89515b59c4e006f1f7e5a14cf34488f6c70bf715c7a32de5e47f8cc197d200e25fbeb410e3bce4f6560e0b8a07a91705ca1f0ab068723e2be9a6248f0810c6b66a228349b336b0395711ba700d72bfbcb73be7d4223758e4ebb95e9e1d41bf3d4354346ed1471619f364cacc0228da9efe06981bc990073fa75cfb703e0a20d609c7adf2edbc597f93770fcb71f9588d12deec2e05a1c39a41eeb5996b2b79f3fabbe4a6d33be1d62b1fbac3bccd1e74f6066c37e674611af905b49ec36efd5835dee85a1aa971cb5d474c905fdc0f495e55badb629e4db",
+          "note": "DATA 207 bytes",
+          "counter": 4,
+          "inner_hex": "0120010003000000cf0000000a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5ac",
+          "op": "DATA",
+          "stream": 1,
+          "seq": 3,
+          "flags": 0,
+          "body_hex": "0a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5ac"
+        },
+        {
+          "i": 4,
+          "t_ms": 337,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000059286aeab2a69d6c19eb0fcc629c45da4c437a27871aa19215cfc6927574f4191bd1318ede2ba0628ce0acc1f24444f149ba863501ccc797316dc66a23d05db975b2c9b255049242dfc60c2adb09befff7c9e84c2549e06bf940f3bceb7fcd8926aff96f265858559441b753ce04ac45eca83c62cf0f8e929eb569818ac95f09c27703627da03645b8fa3a8b295c085d17bd907d816134c55fd7d3bf052a046ec9b2050c8c5aab26d5550ce68de525a7905299353a6c5f0fb3d05959735c24330735fa2f43ef7e441fdaa30759deb1650b0316cd7456904800676ce3b223dfe3d6546c6597b0e37cfa6a814",
+          "note": "DATA 207 bytes",
+          "counter": 5,
+          "inner_hex": "0120010004000000cf000000b3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e55",
+          "op": "DATA",
+          "stream": 1,
+          "seq": 4,
+          "flags": 0,
+          "body_hex": "b3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e55"
+        },
+        {
+          "i": 5,
+          "t_ms": 338,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "10000000000000000609e06fb92709ff4c2e44004aa37c63a56b3ef77aa7073425044fceaa2bcff4aabe4e1458ceb1d8949c8bf1335c69856f1deb2da8070e94114f02d7715554d891cdc816f86124265c0767ff65e0c2e92a3695640959060763ab95147624511dc00d65b32eb456089a945057c55d5cfb5adefae82ec4ad58f289bd038ec98c9c6faba80f11b6524a30fb840de13916646232e7f3ead6429146408fee16d1306e27d81fa6d1d1b5b81237c53d3f9f49c45ed14661f68fd89a8498ad5cb7c25648c0ba91a193a8538f8d263986cda46e4335d292debc1b07f810d04813e93e7ed1ffa0bbe9e6f9fc61079c4286",
+          "note": "DATA 207 bytes",
+          "counter": 6,
+          "inner_hex": "0120010005000000cf0000005c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe",
+          "op": "DATA",
+          "stream": 1,
+          "seq": 5,
+          "flags": 0,
+          "body_hex": "5c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe"
+        },
+        {
+          "i": 6,
+          "t_ms": 339,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000072c659c5f7fb7e2310c26d393ca024e2cf846e72ac2c4acab28cd5df28a40a2eec50f9daf7b01d264d433f2c3e50fd0d2ec661d37214093479587c9dccce37d8c3e25e44bfe4de50c839e213e117ae934ba85dcc277b1398c0830e224fd31ac28deda3f1d47757c8b0e1f5b1501aee6e9848d6fffb39ff832d843b2b46c83f1ecf56a5ef39fd21ac0b17e6ce71620761a6d73525fad6f59d2ec351b75dbda4c945c029b0ae73962cd2b928f23c5da1bc0e45df88deb08644c4dc181b364b87fe1ab89915ffdd75f31f51f7e2c48254eef0873d36ecad7f377a8a72be13dbe6ee57c",
+          "note": "DATA 197 bytes",
+          "counter": 7,
+          "inner_hex": "0120010006000000c5000000050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61",
+          "op": "DATA",
+          "stream": 1,
+          "seq": 6,
+          "flags": 0,
+          "body_hex": "050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61"
+        }
+      ]
+    },
+    {
+      "id": "open_err_vpn",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "OPEN_ERR 5 (VPN or route unavailable) before OPEN_OK",
+      "expected": "stream ends with Vpn, session continues",
+      "p4_sends_hex": [
+        "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352"
+      ],
+      "session_continues": true,
+      "p4_phase": "pipe",
+      "auth_cooldown": false,
+      "p4_error": "None",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 244,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352",
+          "note": "OPEN window 1024 port 443 address type 1",
+          "counter": 2,
+          "inner_hex": "01100100010000000c00030000040000bb010104c000020a",
+          "op": "OPEN",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00040000bb010104c000020a"
+        },
+        {
+          "i": 1,
+          "t_ms": 304,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a38729b49a11f99605e8cd2b5ac6fe2648787a6394c66ba1ecce20a6704",
+          "note": "OPEN_ERR code 5",
+          "counter": 2,
+          "inner_hex": "0112010001000000020003000500",
+          "op": "OPEN_ERR",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "0500"
+        }
+      ]
+    },
+    {
+      "id": "late_close_for_ended_stream",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "CLOSE for a stream already ended by OPEN_ERR",
+      "expected": "CLOSE_ACK, session continues",
+      "p4_sends_hex": [
+        "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352",
+        "100000000000000003b69a13966342281b59002a10520f7019b5a645359144a39e32935b22"
+      ],
+      "session_continues": true,
+      "p4_phase": "pipe",
+      "auth_cooldown": false,
+      "p4_error": "None",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 244,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "1000000000000000027bab594661596cd7b5a9c8ff0edc451e152655decaa2c43f15b277b50b6e826fd654eeaceacdd352",
+          "note": "OPEN window 1024 port 443 address type 1",
+          "counter": 2,
+          "inner_hex": "01100100010000000c00030000040000bb010104c000020a",
+          "op": "OPEN",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "00040000bb010104c000020a"
+        },
+        {
+          "i": 1,
+          "t_ms": 304,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "1000000000000000029a38729b49a11f99605e8cd2b7ac252f71eb2cd20b5896ae9f50fdc4be01",
+          "note": "OPEN_ERR code 7",
+          "counter": 2,
+          "inner_hex": "0112010001000000020003000700",
+          "op": "OPEN_ERR",
+          "stream": 1,
+          "seq": 1,
+          "flags": 3,
+          "body_hex": "0700"
+        },
+        {
+          "i": 2,
+          "t_ms": 335,
+          "dir": "phone_to_p4",
+          "att": "notify",
+          "kind": "data",
+          "value_hex": "100000000000000003c65d9003590b3225894a175e5c437f0e78d73b0f759bb718e6c703dea20d",
+          "note": "CLOSE normal (0)",
+          "counter": 3,
+          "inner_hex": "0123010002000000020003000000",
+          "op": "CLOSE",
+          "stream": 1,
+          "seq": 2,
+          "flags": 3,
+          "body_hex": "0000"
+        },
+        {
+          "i": 3,
+          "t_ms": 336,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "100000000000000003b69a13966342281b59002a10520f7019b5a645359144a39e32935b22",
+          "note": "CLOSE_ACK",
+          "counter": 3,
+          "inner_hex": "012401000200000000000300",
+          "op": "CLOSE_ACK",
+          "stream": 1,
+          "seq": 2,
+          "flags": 3,
+          "body_hex": ""
+        }
+      ]
+    },
+    {
+      "id": "service_changed_after_ready",
+      "direction": "phone_to_p4",
+      "source": "p4_production",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "Service Changed indication on the READY link",
+      "expected": "teardown, no cooldown",
+      "p4_sends_hex": [],
+      "session_continues": false,
+      "p4_phase": "retiring",
+      "auth_cooldown": false,
+      "p4_error": "Protocol",
+      "frames": []
+    },
+    {
+      "id": "tampered_confirm_ack",
+      "direction": "p4_to_phone",
+      "source": "contract",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "CONFIRM_ACK fails authentication",
+      "expected": "disconnect, no REJECT",
+      "android_auth_cooldown": true,
+      "rule": "R14 invalid authentication",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 133,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_confirm_ack",
+          "value_hex": "04773d2897d0e62b8f074c8522d888d23c00d4",
+          "note": "production CONFIRM_ACK with the last tag bit flipped"
+        }
+      ]
+    },
+    {
+      "id": "p4_reject",
+      "direction": "p4_to_phone",
+      "source": "contract",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "REJECT 05 02 received during the handshake",
+      "expected": "disconnect",
+      "android_auth_cooldown": true,
+      "rule": "R14 REJECT counts only during the handshake",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 493,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_reject",
+          "value_hex": "0502",
+          "note": "production REJECT"
+        }
+      ]
+    },
+    {
+      "id": "zero_device_public_key",
+      "direction": "p4_to_phone",
+      "source": "contract",
+      "stage": "handshake",
+      "att_mtu": 247,
+      "description": "HELLO_ACK whose X25519 shared secret is all zero",
+      "expected": "disconnect",
+      "android_auth_cooldown": true,
+      "rule": "R4 low-order or zero X25519 is an authentication failure",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 92,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "secure_hello_ack",
+          "value_hex": "020000000000000000000000000000000000000000000000000000000000000000101112131415161718191a1b1c1d1e1f",
+          "note": "device public key zeroed"
+        }
+      ]
+    },
+    {
+      "id": "replayed_p4_data",
+      "direction": "p4_to_phone",
+      "source": "contract",
+      "stage": "pipe",
+      "att_mtu": 247,
+      "description": "a P4 DATA counter not above the last accepted one",
+      "expected": "disconnect",
+      "android_auth_cooldown": true,
+      "rule": "R6 strict increase, R14 crypto failure",
+      "frames": [
+        {
+          "i": 0,
+          "t_ms": 214,
+          "dir": "p4_to_phone",
+          "att": "write_cmd",
+          "kind": "data",
+          "value_hex": "10000000000000000140dece5ea92fd6af95e23b5bec20ebed66178199db6318deb50291022d05f37de135e256504eeb90",
+          "note": "production counter-1 DATA (pipe HELLO), delivered a second time"
+        }
+      ]
+    }
+  ]
+}

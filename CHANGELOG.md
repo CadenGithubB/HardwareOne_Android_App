@@ -7,6 +7,46 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **BLE relay pipe (optional, experimental).** A HardwareOne P4 away from Wi-Fi can reach its
+  existing HTTPS relay through the phone.
+  - **How it works:** the phone is a Bluetooth peripheral and forwards the device's TLS bytes,
+    unopened, over an ordinary socket through the WireGuard tunnel. TLS stays end to end between the
+    device and the relay, so the phone never sees the request, the token or the reply.
+  - **Security:** there is no pairing or bond. The Bluetooth hop runs inside its own HW1-PIPE-v1
+    channel (X25519, ChaCha20-Poly1305), keyed by a dedicated pipe passphrase entered with the same
+    rules as the device's `phonepipesecret`.
+  - **Limits:** one session at a time, a 30 s cooldown after a failed authentication, and bounded
+    buffers with credit flow control. A failed stream is never reconnected or replayed. VPN loss
+    keeps the pipe ready and refuses new streams.
+  - **Recovery:** an enabled pipe comes back by itself after Bluetooth off/on, a reboot (once
+    unlocked), an app update or a crash. After a background stop by Android, it comes back on the
+    next app open.
+  - **Tested on hardware** with a HardwareOne P4 in both of its Bluetooth client modes, through the
+    VPN on Wi-Fi and on mobile data. See `docs/BLE_RELAY_PIPE.md` for the results and the remaining
+    gaps.
+  - **Its page** under ⚙ Settings has Start/Stop, the passphrase and destination, background-setup
+    hints, endpoint-free diagnostics and an exportable qualification log.
+- **Home AI bridge (optional).** Away from home, HardwareOne can keep using the AI on the home
+  machine: the device joins the phone's hotspot and sends its HTTPS requests to the app, which
+  forwards them to the home relay through the WireGuard tunnel (the WireGuard app stays the only
+  VPN; the bridge never routes outside it). It works independently of the Bluetooth console, so the
+  device can stay in glasses mode. The page under ⚙ Settings has explicit Start/Stop, separate
+  hotspot-listener and home-relay status with actionable messages (no hotspot, no VPN, route
+  missing, unreachable, certificate untrusted/mismatch, token rejected), a relay probe that sends
+  no prompt, and the exact `llmhttpurl`/`llmhttpca` lines to apply on the device (copy, or push the
+  URL over Bluetooth). Runs as a foreground service with a visible notification for locked-screen
+  use; follows hotspot address changes and reissues its certificate automatically. Forwards only
+  `POST /v1/chat/completions` and `POST /v1/terminal` with the relay's own size/time limits, and
+  never retries: an uncertain outcome is reported as such. See `docs/HOME_AI_BRIDGE.md`.
+- The bridge page checks that the phone can actually answer hotspot clients. A non-bypassable
+  VPN with `AllowedIPs 0.0.0.0/0` makes Android route those replies into the tunnel, so the device
+  times out while the listener looks healthy; the page now flags the listener as unreachable and
+  names the hotspot prefix to exclude in WireGuard and the home prefixes to keep. VPN lockdown
+  (replies refused outright) is reported separately.
+- While the home relay is silent after its headers (the agent is still thinking), the bridge sends
+  the device one SSE comment line every 20 s. The firmware ignores comment lines but resets its
+  60 s stall timer on any byte, so a slow first token no longer ends the turn; the relay may now
+  stay silent for up to the 300 s turn limit.
 - **The app is now a device notification sink.** HardwareOne's notification system already fans an
   event out to the OLED banner, the web toast and the G2 lens; the app joins as a fourth surface
   (firmware sink `NSINK_APP`, master switch `notifydeviceapp`). Cards arrive unsolicited on the
@@ -28,10 +68,33 @@ All notable changes to this project are documented here. The format follows
 - **Recovery fallback credential setup.** A missing recovery WPA2/HTTP password can be sent once over
   encrypted BLE; it is never written to app storage or command history.
 
+### Changed
+- The relay pipe writes connection-state, MTU, subscription and advertising events to the system log
+  under the tag `PipeGatt`. It names devices `dev1`, `dev2`, … and never logs a Bluetooth address.
+- The app now declares `BLUETOOTH_ADVERTISE` (Nearby devices, Android 12+) for the BLE relay pipe,
+  plus the normal `RECEIVE_BOOT_COMPLETED` and `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` so an enabled
+  pipe can restart after a reboot or update and its page can offer battery "Unrestricted". The pipe
+  also uses the existing network/foreground-service permissions below.
+- The app now declares `INTERNET`, `ACCESS_NETWORK_STATE`, `CHANGE_NETWORK_STATE` (normal, used only
+  as the Android 14 foreground-service prerequisite), `FOREGROUND_SERVICE(_CONNECTED_DEVICE)`,
+  `POST_NOTIFICATIONS` and `WAKE_LOCK` for the Home AI bridge (the BLE relay pipe uses them too).
+  Only the bridge and the pipe open sockets; both are off until configured and started.
+
 ### Security
+- The relay pipe never terminates TLS, parses HTTP or stores payloads. It creates no Bluetooth
+  bond: every frame on the link is authenticated and encrypted with HW1-PIPE-v1 keys derived from
+  the pipe passphrase, which never leaves the phone, and failed authentication starts a 30 s
+  cooldown. It connects only to the approved destination (checked before any DNS or TCP), resolves
+  and connects only through the VPN network, keeps the passphrase and destination encrypted under
+  separate non-exportable Keystore keys, and logs no endpoint or content.
 - OTA adds no network or broad storage permission. The system document picker supplies the local
-  bundle, the app still has no `INTERNET` permission, and the device independently verifies its
-  embedded release trust root before selecting the image.
+  bundle, OTA uses no network access, and the device independently verifies its embedded release
+  trust root before selecting the image.
+- The bridge terminates the device's TLS with an app-owned ECDSA CA whose private key is stored
+  with a non-exportable Keystore key, pins the home leg to the imported relay CA with hostname/IP
+  verification, binds every outbound socket to the VPN network (no process-wide binding, no
+  fallback), passes the device token through without storing it, and logs no token or
+  conversation text.
 - Every OTA control/data step requires the HardwareOne Secure Channel and a live superadmin session;
   the protocol exposes no caller-selected device path.
 

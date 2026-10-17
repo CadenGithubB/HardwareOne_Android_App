@@ -35,8 +35,12 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.hardwareone.console.ble.BleConstants
 import com.hardwareone.console.ble.BleManager
 import com.hardwareone.console.ble.ConnectionState
+import com.hardwareone.console.bridge.BridgeStore
+import com.hardwareone.console.bridge.HomeBridge
+import com.hardwareone.console.pipe.PhonePipe
 import com.hardwareone.console.security.SavedLog
 import com.hardwareone.console.ui.AppPage
 import com.hardwareone.console.ui.CameraScreen
@@ -52,6 +56,8 @@ import com.hardwareone.console.ui.EspNowScreen
 import com.hardwareone.console.ui.FilesScreen
 import com.hardwareone.console.ui.HealthScreen
 import com.hardwareone.console.ui.HeaderNav
+import com.hardwareone.console.ui.HomeBridgeScreen
+import com.hardwareone.console.ui.PhonePipeScreen
 import com.hardwareone.console.ui.LlmChatScreen
 import com.hardwareone.console.ui.LoginDialog
 import com.hardwareone.console.ui.MapsScreen
@@ -113,6 +119,8 @@ class MainActivity : FragmentActivity() {
         data class EspNowDevice(val mac: String, val name: String) : Screen
         data object SavedLogs : Screen
         data object Notifications : Screen
+        data object HomeBridge : Screen
+        data object BlePipe : Screen
         data class Viewer(val fileName: String, val title: String, val text: String) : Screen
     }
 
@@ -135,6 +143,63 @@ class MainActivity : FragmentActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             vm.startScan()
         }
+
+    /** The bridge's ongoing notification needs POST_NOTIFICATIONS on Android 13+; the service
+     *  runs either way, so the result only decides whether the status card is visible. */
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { HomeBridge.start(this) }
+
+    private fun startHomeBridge() {
+        val needsPrompt = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        if (needsPrompt) notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        else HomeBridge.start(this)
+    }
+
+    /**
+     * The one battery step the pipe recommends (FW-1): "Unrestricted" lets Android restart it in the
+     * background after process death. Falls back to the battery settings list if the direct prompt
+     * is unavailable.
+     */
+    private fun requestPipeBatteryExemption() {
+        val direct = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:$packageName"))
+        runCatching { startActivity(direct) }
+            .recoverCatching { startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+            .onFailure { PhonePipe.update { it.copy(error = "Open Settings → Apps → HardwareOne → Battery and choose Unrestricted.") } }
+    }
+
+    /** What to do once the pipe's permissions are settled (start). */
+    private var pendingPipeAction: (() -> Unit)? = null
+
+    /** Nearby devices (connect + advertise) are required; notifications only make the status visible. */
+    private val pipePermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
+            val action = pendingPipeAction
+            pendingPipeAction = null
+            // Re-check rather than trust the result map: an interrupted request returns an empty map.
+            if (missingPipePermissions(includeNotifications = false).isEmpty()) {
+                action?.invoke()
+            } else {
+                PhonePipe.update { it.copy(error = "The pipe needs the Nearby devices permission to advertise to HardwareOne.") }
+            }
+        }
+
+    private fun missingPipePermissions(includeNotifications: Boolean): List<String> = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            add(android.Manifest.permission.BLUETOOTH_CONNECT)
+            add(android.Manifest.permission.BLUETOOTH_ADVERTISE)
+        }
+        if (includeNotifications && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(android.Manifest.permission.POST_NOTIFICATIONS)
+    }.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+
+    private fun withPipePermissions(action: () -> Unit) {
+        if (pendingPipeAction != null) return // a request is already showing; ignore repeat taps
+        val wanted = missingPipePermissions(includeNotifications = true)
+        if (wanted.isEmpty()) action() else {
+            pendingPipeAction = action
+            pipePermissionLauncher.launch(wanted.toTypedArray())
+        }
+    }
 
     private val createDocumentLauncher =
         registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
@@ -164,6 +229,8 @@ class MainActivity : FragmentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         handleWidgetConnect(intent) // tap-to-reconnect launched us from the widget
+        handleBridgeIntent(intent) // the bridge notification opens its page
+        handlePipeIntent(intent) // so does the pipe's; onResume resumes an enabled pipe (FW-1)
         setContent {
             var themePref by remember { mutableStateOf(ThemeStore.load(this)) }
             val darkTheme = when (themePref) {
@@ -292,12 +359,15 @@ class MainActivity : FragmentActivity() {
                                     }
                                 }
                             }
+                            val bridgeState by HomeBridge.state.collectAsState()
                             DevicesScreen(
                                 vm = vm,
                                 battery = battery,
                                 onScanClicked = ::onScanClicked,
                                 onLogin = ::onLoginButtonClicked,
                                 nav = headerNav(active = AppPage.DEVICES, onOpenDevices = null),
+                                bridgeSummary = if (bridgeState.running) HomeBridge.summary(bridgeState) else null,
+                                onOpenBridge = { navTo(Screen.HomeBridge) },
                             )
                         }
                     }
@@ -309,7 +379,14 @@ class MainActivity : FragmentActivity() {
                         val autoSaveLogs by vm.autoSaveLogs.collectAsState()
                         val secureConfigured by vm.secureChannelConfigured.collectAsState()
                         val secureLocked by vm.secureChannelLocked.collectAsState()
+                        val bridgeState by HomeBridge.state.collectAsState()
+                        val pipeState by PhonePipe.state.collectAsState()
+                        LaunchedEffect(Unit) { PhonePipe.load(this@MainActivity) }
                         SettingsScreen(
+                            bridgeSummary = HomeBridge.summary(bridgeState),
+                            onOpenHomeBridge = { navTo(Screen.HomeBridge) },
+                            pipeSummary = PhonePipe.summary(pipeState),
+                            onOpenPipe = { navTo(Screen.BlePipe) },
                             themePref = themePref,
                             // this@MainActivity, not `this`: the surrounding Box makes the
                             // implicit receiver a BoxScope.
@@ -800,6 +877,45 @@ class MainActivity : FragmentActivity() {
                         )
                     }
 
+                    Screen.HomeBridge -> {
+                        val bridgeState by HomeBridge.state.collectAsState()
+                        val connection by vm.connectionState.collectAsState()
+                        val info by vm.deviceInfo.collectAsState()
+                        val store = remember { BridgeStore(this@MainActivity) }
+                        // What one Bluetooth command may carry on the live link (see BleManager.sendCommand).
+                        val linkLimit = if (connection is ConnectionState.Ready && info != null) {
+                            if (info!!.secure) (info!!.mtu - 28).coerceAtLeast(20) else BleConstants.MAX_COMMAND_BYTES
+                        } else 0
+                        HomeBridgeScreen(
+                            state = bridgeState,
+                            store = store,
+                            bleLoggedIn = loggedIn && connection is ConnectionState.Ready,
+                            bleCommandLimit = linkLimit,
+                            onStart = ::startHomeBridge,
+                            onStop = { HomeBridge.stop(this@MainActivity) },
+                            onProbe = { HomeBridge.probe(this@MainActivity) },
+                            onSendDeviceCommand = vm::send,
+                            onBack = { navBack() },
+                        )
+                    }
+
+                    Screen.BlePipe -> {
+                        val pipeState by PhonePipe.state.collectAsState()
+                        LaunchedEffect(Unit) { PhonePipe.load(this@MainActivity) }
+                        PhonePipeScreen(
+                            state = pipeState,
+                            onStart = { withPipePermissions { PhonePipe.start(this@MainActivity) } },
+                            onStop = { PhonePipe.stop(this@MainActivity) },
+                            onSaveSecret = { secret -> PhonePipe.saveSecret(this@MainActivity, secret) },
+                            onSaveTarget = { url -> PhonePipe.saveTarget(this@MainActivity, url) },
+                            onForget = { PhonePipe.forget(this@MainActivity) },
+                            onAllowBackground = { requestPipeBatteryExemption() },
+                            onExportLog = { exportPipeLog() },
+                            onClearLog = { Thread { com.hardwareone.console.pipe.PipeLog(this@MainActivity).clear() }.start() },
+                            onBack = { navBack() },
+                        )
+                    }
+
                     Screen.Notifications -> {
                         val alerts by vm.notifications.collectAsState()
                         NotificationsScreen(
@@ -868,6 +984,13 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Back from the battery prompt: show the new state even while the pipe is stopped. Also
+        // resumes an enabled pipe that Android stopped while this activity stayed in recents (FW-1).
+        PhonePipe.load(this)
     }
 
     override fun onStop() {
@@ -944,6 +1067,21 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    /** The pipe's qualification log plus a counters line, through the same document picker as logs. */
+    private fun exportPipeLog() {
+        val s = PhonePipe.state.value
+        Thread {
+            val text = com.hardwareone.console.pipe.PipeLog(this).export(
+                com.hardwareone.console.pipe.PipeLog.countersLine(s.stats, s.droppedCallbacks, android.os.SystemClock.elapsedRealtime()),
+            )
+            runOnUiThread {
+                pendingExportText = text
+                val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+                createDocumentLauncher.launch("pipe-qualification-$stamp.jsonl")
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
     private fun exportLog(text: String) {
         pendingExportText = text
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
@@ -1001,6 +1139,24 @@ class MainActivity : FragmentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleWidgetConnect(intent)
+        handleBridgeIntent(intent)
+        handlePipeIntent(intent)
+    }
+
+    /** The pipe notification lands on the pipe page. */
+    private fun handlePipeIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_OPEN_PIPE, false) != true) return
+        intent.removeExtra(EXTRA_OPEN_PIPE)
+        nav.clear()
+        navTo(Screen.BlePipe)
+    }
+
+    /** The bridge notification (and its Stop action's sibling tap target) lands on the bridge page. */
+    private fun handleBridgeIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_OPEN_BRIDGE, false) != true) return
+        intent.removeExtra(EXTRA_OPEN_BRIDGE)
+        nav.clear()
+        navTo(Screen.HomeBridge)
     }
 
     /** If the launch carried a device address (only set when the widget showed "disconnected"),
@@ -1018,6 +1174,10 @@ class MainActivity : FragmentActivity() {
     companion object {
         /** Intent extra: a device MAC the app should reconnect to (set by the widget when offline). */
         const val EXTRA_CONNECT_ADDRESS = "hw1_connect_address"
+        /** Intent extra: open the Home AI bridge page (set by the bridge's notification). */
+        const val EXTRA_OPEN_BRIDGE = "hw1_open_bridge"
+        /** Intent extra: open the BLE relay pipe page (set by the pipe's notification). */
+        const val EXTRA_OPEN_PIPE = "hw1_open_pipe"
     }
 
     // --- Scanning entry point ----------------------------------------------------------

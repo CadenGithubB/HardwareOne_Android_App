@@ -62,6 +62,10 @@ private val CardShape = RoundedCornerShape(14.dp)
 
 @Composable
 fun SettingsScreen(
+    bridgeSummary: String,
+    onOpenHomeBridge: () -> Unit,
+    pipeSummary: String,
+    onOpenPipe: () -> Unit,
     themePref: ThemePreference,
     onThemeChange: (ThemePreference) -> Unit,
     securityAvailable: Boolean,
@@ -154,6 +158,15 @@ fun SettingsScreen(
                             onThemeChange(ThemePreference.DARK)
                         }
                     }
+
+                    HomeBridgeCard(summary = bridgeSummary, onOpen = onOpenHomeBridge)
+
+                    EntryCard(
+                        title = "BLE relay pipe",
+                        summary = pipeSummary,
+                        description = "Carry the device's end-to-end encrypted relay traffic over Bluetooth when it is away from Wi-Fi, through WireGuard.",
+                        onOpen = onOpenPipe,
+                    )
 
                     LogsCard(
                         logsAvailable = logsAvailable,
@@ -394,6 +407,48 @@ private fun SecureChannelSection(
             if (configured || locked) {
                 TextButton(onClick = onClear) { Text("Disable", color = hw.danger) }
             }
+        }
+    }
+}
+
+/** Entry point for the optional Home AI bridge; the page itself holds the controls and status. */
+@Composable
+private fun HomeBridgeCard(summary: String, onOpen: () -> Unit) = EntryCard(
+    title = "Home AI bridge",
+    summary = summary,
+    description = "Forward the device's AI requests from the phone hotspot to the home relay over WireGuard.",
+    onOpen = onOpen,
+)
+
+/** A tappable card that opens an optional feature's own page. */
+@Composable
+private fun EntryCard(title: String, summary: String, description: String, onOpen: () -> Unit) {
+    val hw = LocalHwColors.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(CardShape)
+            .background(hw.cardBg)
+            .border(1.dp, hw.cardBorder, CardShape)
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = title,
+            color = hw.muted,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(vertical = 6.dp),
+        )
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = summary, color = hw.onGradient, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = description,
+                    color = hw.muted,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            Text(text = "›", color = hw.muted, style = MaterialTheme.typography.titleLarge)
         }
     }
 }

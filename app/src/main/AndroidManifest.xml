@@ -14,6 +14,11 @@
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="s" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- BLE relay pipe (optional, off by default): the phone advertises the pipe service so
+         HardwareOne's P4 can connect to it as a central and authenticate with the pipe passphrase. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADVERTISE"
+        tools:targetApi="s" />
 
     <!--
         Legacy permissions for API <= 30 only. On API 30 and below a BLE scan still
@@ -29,7 +34,34 @@
         android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
 
-    <!-- Require BLE hardware; no INTERNET permission is declared anywhere. -->
+    <!--
+        Home AI bridge and BLE relay pipe (optional features, off by default). These are the only
+        network-related permissions in the app. The bridge accepts HTTPS from the ESP32 on the
+        phone's hotspot and forwards it to the configured home relay; the pipe forwards a P4's
+        opaque TLS bytes from Bluetooth to the one approved relay destination. Both go only through
+        the user's WireGuard tunnel. Nothing else in the app opens a socket.
+
+        - INTERNET / ACCESS_NETWORK_STATE: sockets, and finding the VPN network to bind them to.
+        - CHANGE_NETWORK_STATE: a normal (auto-granted) permission that Android 14+ accepts as the
+          prerequisite for a connectedDevice foreground service; the app never changes network state.
+        - FOREGROUND_SERVICE(_CONNECTED_DEVICE), POST_NOTIFICATIONS: the visible, ongoing
+          notification that keeps the bridge / pipe alive while the screen is locked.
+        - WAKE_LOCK: held only while a request/stream is being forwarded, with a hard timeout.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- BLE relay pipe recovery (FW-1): restart an enabled pipe after a reboot (once unlocked) or an
+         update, and offer the one battery step ("Unrestricted") that lets Android restart it in
+         the background. Both are normal permissions. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Require BLE hardware. -->
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="true" />
@@ -57,6 +89,37 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Home AI bridge: foreground service that accepts the ESP32's HTTPS requests on the
+            hotspot and forwards them to the home relay over the VPN. Started/stopped only by
+            the app's own UI (not exported).
+        -->
+        <service
+            android:name=".bridge.HomeBridgeService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!--
+            BLE relay pipe: foreground service that serves HardwareOne as a GATT server (HW1-PIPE-v1
+            authenticated) and forwards its opaque TLS bytes to the one approved relay through the
+            VPN. Started by the app's own UI or, while the user left it enabled, by the boot/update
+            receiver below (not exported).
+        -->
+        <service
+            android:name=".pipe.PhonePipeService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- System broadcasts reach a non-exported receiver; nothing else can trigger it. -->
+        <receiver
+            android:name=".pipe.PipeBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Home/lock-screen widget: connection dot + name + configurable fields. -->
         <receiver

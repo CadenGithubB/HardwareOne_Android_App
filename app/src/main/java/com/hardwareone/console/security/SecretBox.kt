@@ -29,16 +29,22 @@ class SecretBox(context: Context, private val alias: String, prefsName: String) 
     /** A ciphertext blob is stored, regardless of whether it can still be decrypted. */
     fun hasCiphertext(): Boolean = prefs.contains(KEY_CT)
 
-    fun put(value: String) {
+    fun put(value: String) = putBytes(value.toByteArray(Charsets.UTF_8))
+
+    /** Stores raw bytes (for secrets that must not pass through a String). */
+    fun putBytes(value: ByteArray) {
         val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, getOrCreateKey()) }
-        val ct = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+        val ct = cipher.doFinal(value)
         prefs.edit()
             .putString(KEY_CT, Base64.encodeToString(ct, Base64.NO_WRAP))
             .putString(KEY_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             .apply()
     }
 
-    fun get(): String? {
+    fun get(): String? = getBytes()?.let { b -> String(b, Charsets.UTF_8).also { b.fill(0) } }
+
+    /** The stored bytes, or null when absent or no longer decryptable. */
+    fun getBytes(): ByteArray? {
         val ct = prefs.getString(KEY_CT, null)?.let { Base64.decode(it, Base64.NO_WRAP) }
             ?: run { Log.w(TAG, "get[$alias]: no ciphertext in prefs"); return null }
         val iv = prefs.getString(KEY_IV, null)?.let { Base64.decode(it, Base64.NO_WRAP) }
@@ -49,7 +55,7 @@ class SecretBox(context: Context, private val alias: String, prefsName: String) 
             val cipher = Cipher.getInstance(TRANSFORMATION).apply {
                 init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
             }
-            String(cipher.doFinal(ct), Charsets.UTF_8)
+            cipher.doFinal(ct)
         } catch (e: Exception) {
             Log.w(TAG, "get[$alias]: decrypt failed: ${e.javaClass.simpleName}: ${e.message}")
             null
