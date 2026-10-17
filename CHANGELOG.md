@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com) and this project uses
 [Semantic Versioning](https://semver.org).
 
+## [2.7.1] — 2026-10-17
+
+Code cleanup: the Home AI bridge is removed, now that the BLE relay pipe does its job.
+
+### Removed
+- **Home AI bridge.** The hotspot-based bridge added in 2.7.0 is gone: its Settings entry and page,
+  its Devices-page status line, its foreground service and its tests. The BLE relay pipe reaches the
+  same home relay over Bluetooth, needs no hotspot, and keeps TLS end to end between the device and
+  the relay instead of terminating it on the phone. A device that was set up for the bridge still
+  has `llmhttpurl` and `llmhttpca` pointing at the phone; set them back to your relay's, then use
+  the pipe (see `docs/BLE_RELAY_PIPE.md`).
+- **Leftover bridge data is deleted** on the first launch after the update: its settings, its
+  private CA key and that key's Keystore entry, and its notification channel.
+- **BouncyCastle PKIX dependency.** It was only used to issue the bridge's certificates; the app
+  now ships only BouncyCastle's core crypto provider.
+
+### Security
+- **Smaller network surface.** The app no longer listens on any port, and the `INTERNET`
+  permission is now used only by the BLE relay pipe's VPN-bound outgoing connections.
+
 ## [2.7.0] — 2026-10-17
 
 HardwareOne can now reach its AI away from Wi-Fi through the phone, over Bluetooth or the phone's
